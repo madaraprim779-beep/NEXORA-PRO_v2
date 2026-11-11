@@ -1,8 +1,22 @@
 
 import { handleMessaging } from "./messaging";
+import { handleGroups } from "./groups";
+import { handleMedia } from "./media";
+import { handleVoice } from "./voice";
+import { handleReactions } from "./reactions";
+import { handleStatuses } from "./statuses";
+import { handleCalls } from "./calls";
+import { handlePrivacy } from "./privacy";
+import { handleRealtime, RealtimeRoom } from "./realtime";
+import { handleMessages } from "./messages";
+import { handleNotifications } from "./notifications";
+
+export { RealtimeRoom };
 
 interface Env {
   DB: D1Database;
+  MEDIA: R2Bucket;
+  REALTIME: DurableObjectNamespace;
 }
 
 interface AuthUser {
@@ -14,8 +28,11 @@ interface AuthUser {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods":
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
 };
 
 function response(data: unknown, status = 200): Response {
@@ -26,6 +43,23 @@ function response(data: unknown, status = 200): Response {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
     },
+  });
+}
+
+function withCors(result: Response): Response {
+  // Ne pas reconstruire une réponse WebSocket.
+  if (result.status === 101) return result;
+
+  const headers = new Headers(result.headers);
+
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    headers.set(key, value);
+  }
+
+  return new Response(result.body, {
+    status: result.status,
+    statusText: result.statusText,
+    headers,
   });
 }
 
@@ -132,7 +166,7 @@ async function createSession(db: D1Database, userId: string) {
 
   await db.prepare(`
     INSERT INTO sessions
-    (id, user_id, token_hash, expires_at)
+      (id, user_id, token_hash, expires_at)
     VALUES (?, ?, ?, ?)
   `).bind(sessionId, userId, tokenHash, expiresAt).run();
 
@@ -164,7 +198,15 @@ async function authenticate(
   ).first<AuthUser>();
 }
 
-async function handleHealth(db: D1Database): Promise<Response> {
+async function readJson(request: Request): Promise<any> {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+async function handleHealth(env: Env): Promise<Response> {
   const expectedTables = [
     "profiles",
     "credentials",
@@ -179,9 +221,12 @@ async function handleHealth(db: D1Database): Promise<Response> {
     "message_reactions",
     "notifications",
     "reports",
+    "privacy_settings",
+    "message_reads",
+    "calls",
   ];
 
-  const result = await db.prepare(`
+  const result = await env.DB.prepare(`
     SELECT name
     FROM sqlite_master
     WHERE type = 'table'
@@ -204,16 +249,291 @@ async function handleHealth(db: D1Database): Promise<Response> {
     tables_found: foundTables.length,
     tables_expected: expectedTables.length,
     missing_tables: missingTables,
+    services: {
+      database: "configured",
+      media_storage: "binding_required",
+      realtime: "binding_required",
+      calls: "signaling_not_configured",
+    },
     timestamp: new Date().toISOString(),
   });
 }
 
-async function readJson(request: Request): Promise<any> {
-  try {
-    return await request.json();
-  } catch {
-    return null;
+async function handleRegister(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = await readJson(request);
+
+  if (!body) {
+    return response({ error: "Données invalides." }, 400);
   }
+
+  const username =
+    typeof body.username === "string"
+      ? body.username.trim()
+      : "";
+
+  const displayName =
+    typeof body.display_name === "string"
+      ? body.display_name.trim()
+      : "";
+
+  const password = body.password;
+
+  if (!/^[A-Za-z0-9_]{3,24}$/.test(username)) {
+    return response({
+      error: "Pseudo invalide : 3 à 24 caractères."
+    }, 400);
+  }
+
+  if (!displayName || displayName.length > 40) {
+    return response({
+      error: "Nom d'affichage invalide."
+    }, 400);
+  }
+
+  if (
+    typeof password !== "string" ||
+    password.length < 8 ||
+    password.length > 128
+  ) {
+    return response({
+      error: "Mot de passe invalide."
+    }, 400);
+  }
+
+  const userId = crypto.randomUUID();
+  const nexoraId = await createNexoraId(env.DB);
+  const salt = randomString(16);
+  const passwordHash = await hashPassword(password, salt);
+
+  const sessionToken = randomString(48);
+  const tokenHash = await sha256(sessionToken);
+  const sessionId = crypto.randomUUID();
+
+  const expiresAt = new Date(
+    Date.now() + 30 * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO profiles
+        (id, nexora_id, username, display_name)
+      VALUES (?, ?, ?, ?)
+    `).bind(userId, nexoraId, username, displayName),
+
+    env.DB.prepare(`
+      INSERT INTO credentials
+        (user_id, password_hash, password_salt)
+      VALUES (?, ?, ?)
+    `).bind(userId, passwordHash, salt),
+
+    env.DB.prepare(`
+      INSERT INTO sessions
+        (id, user_id, token_hash, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(sessionId, userId, tokenHash, expiresAt),
+
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO privacy_settings (user_id)
+      VALUES (?)
+    `).bind(userId),
+  ]);
+
+  return response({
+    success: true,
+    message: "Compte NEXORA créé.",
+    user: {
+      nexora_id: nexoraId,
+      username,
+      display_name: displayName,
+    },
+    token: sessionToken,
+    expires_at: expiresAt,
+  }, 201);
+}
+
+async function handleLogin(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = await readJson(request);
+
+  if (!body) {
+    return response({ error: "Données invalides." }, 400);
+  }
+
+  const nexoraId =
+    typeof body.nexora_id === "string"
+      ? body.nexora_id.trim().toUpperCase()
+      : "";
+
+  const password = body.password;
+
+  if (
+    !nexoraId ||
+    typeof password !== "string" ||
+    password.length > 128
+  ) {
+    return response({
+      error: "Identifiants manquants ou invalides."
+    }, 400);
+  }
+
+  const user = await env.DB.prepare(`
+    SELECT
+      profiles.id,
+      profiles.nexora_id,
+      profiles.username,
+      profiles.display_name,
+      credentials.password_hash,
+      credentials.password_salt
+    FROM profiles
+    JOIN credentials ON credentials.user_id = profiles.id
+    WHERE profiles.nexora_id = ?
+  `).bind(nexoraId).first<{
+    id: string;
+    nexora_id: string;
+    username: string;
+    display_name: string;
+    password_hash: string;
+    password_salt: string;
+  }>();
+
+  if (!user) {
+    return response({
+      error: "Identifiants incorrects."
+    }, 401);
+  }
+
+  const suppliedHash = await hashPassword(
+    password,
+    user.password_salt
+  );
+
+  if (suppliedHash !== user.password_hash) {
+    return response({
+      error: "Identifiants incorrects."
+    }, 401);
+  }
+
+  const session = await createSession(env.DB, user.id);
+
+  return response({
+    success: true,
+    user: {
+      nexora_id: user.nexora_id,
+      username: user.username,
+      display_name: user.display_name,
+    },
+    token: session.token,
+    expires_at: session.expiresAt,
+  });
+}
+
+async function dispatchPrivateRoute(
+  request: Request,
+  env: Env,
+  user: AuthUser,
+  path: string
+): Promise<Response | null> {
+  // Contacts et conversations privées
+  if (
+    path === "/api/users/search" ||
+    path.startsWith("/api/contacts") ||
+    path.startsWith("/api/conversations")
+  ) {
+    const result = await handleMessaging(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Groupes
+  if (path.startsWith("/api/groups")) {
+    const result = await handleGroups(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Messages
+  if (path.startsWith("/api/messages")) {
+    const result = await handleMessages(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Réactions aux messages
+  if (path.startsWith("/api/reactions")) {
+    const result = await handleReactions(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Photos, vidéos et fichiers
+  if (path.startsWith("/api/media")) {
+    const result = await handleMedia(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Messages vocaux
+  if (path.startsWith("/api/voice")) {
+    const result = await handleVoice(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Statuts
+  if (path.startsWith("/api/statuses")) {
+    const result = await handleStatuses(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Appels
+  if (path.startsWith("/api/calls")) {
+    const result = await handleCalls(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Confidentialité et signalements
+  if (
+    path.startsWith("/api/privacy") ||
+    path.startsWith("/api/reports")
+  ) {
+    const result = await handlePrivacy(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Notifications
+  if (path.startsWith("/api/notifications")) {
+    const result = await handleNotifications(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  // Connexion temps réel
+  if (path.startsWith("/api/realtime/")) {
+    const result = await handleRealtime(
+      request, env, user, path
+    );
+    if (result) return result;
+  }
+
+  return null;
 }
 
 export default {
@@ -229,9 +549,12 @@ export default {
     const path = url.pathname;
 
     try {
-      // HEALTH CHECK
-      if (request.method === "GET" && path === "/api/health") {
-        return await handleHealth(env.DB);
+      // HEALTH
+      if (
+        request.method === "GET" &&
+        path === "/api/health"
+      ) {
+        return await handleHealth(env);
       }
 
       // REGISTER
@@ -239,85 +562,7 @@ export default {
         request.method === "POST" &&
         path === "/api/auth/register"
       ) {
-        const body = await readJson(request);
-
-        if (!body) {
-          return response({ error: "Données invalides." }, 400);
-        }
-
-        const username = body.username?.trim();
-        const displayName = body.display_name?.trim();
-        const password = body.password;
-
-        if (
-          !username ||
-          !/^[A-Za-z0-9_]{3,24}$/.test(username)
-        ) {
-          return response({
-            error: "Pseudo invalide : 3 à 24 caractères."
-          }, 400);
-        }
-
-        if (!displayName || displayName.length > 40) {
-          return response({
-            error: "Nom d'affichage invalide."
-          }, 400);
-        }
-
-        if (
-          typeof password !== "string" ||
-          password.length < 8 ||
-          password.length > 128
-        ) {
-          return response({
-            error: "Mot de passe invalide."
-          }, 400);
-        }
-
-        const userId = crypto.randomUUID();
-        const nexoraId = await createNexoraId(env.DB);
-        const salt = randomString(16);
-        const passwordHash = await hashPassword(password, salt);
-
-        const sessionToken = randomString(48);
-        const tokenHash = await sha256(sessionToken);
-        const sessionId = crypto.randomUUID();
-
-        const expiresAt = new Date(
-          Date.now() + 30 * 24 * 60 * 60 * 1000
-        ).toISOString();
-
-        await env.DB.batch([
-          env.DB.prepare(`
-            INSERT INTO profiles
-            (id, nexora_id, username, display_name)
-            VALUES (?, ?, ?, ?)
-          `).bind(userId, nexoraId, username, displayName),
-
-          env.DB.prepare(`
-            INSERT INTO credentials
-            (user_id, password_hash, password_salt)
-            VALUES (?, ?, ?)
-          `).bind(userId, passwordHash, salt),
-
-          env.DB.prepare(`
-            INSERT INTO sessions
-            (id, user_id, token_hash, expires_at)
-            VALUES (?, ?, ?, ?)
-          `).bind(sessionId, userId, tokenHash, expiresAt),
-        ]);
-
-        return response({
-          success: true,
-          message: "Compte NEXORA créé.",
-          user: {
-            nexora_id: nexoraId,
-            username,
-            display_name: displayName,
-          },
-          token: sessionToken,
-          expires_at: expiresAt,
-        }, 201);
+        return await handleRegister(request, env);
       }
 
       // LOGIN
@@ -325,75 +570,7 @@ export default {
         request.method === "POST" &&
         path === "/api/auth/login"
       ) {
-        const body = await readJson(request);
-
-        if (!body) {
-          return response({ error: "Données invalides." }, 400);
-        }
-
-        const nexoraId = body.nexora_id?.trim().toUpperCase();
-        const password = body.password;
-
-        if (
-          !nexoraId ||
-          typeof password !== "string" ||
-          password.length > 128
-        ) {
-          return response({
-            error: "Identifiants manquants ou invalides."
-          }, 400);
-        }
-
-        const user = await env.DB.prepare(`
-          SELECT
-            profiles.id,
-            profiles.nexora_id,
-            profiles.username,
-            profiles.display_name,
-            credentials.password_hash,
-            credentials.password_salt
-          FROM profiles
-          JOIN credentials
-            ON credentials.user_id = profiles.id
-          WHERE profiles.nexora_id = ?
-        `).bind(nexoraId).first<{
-          id: string;
-          nexora_id: string;
-          username: string;
-          display_name: string;
-          password_hash: string;
-          password_salt: string;
-        }>();
-
-        if (!user) {
-          return response({
-            error: "Identifiants incorrects."
-          }, 401);
-        }
-
-        const suppliedHash = await hashPassword(
-          password,
-          user.password_salt
-        );
-
-        if (suppliedHash !== user.password_hash) {
-          return response({
-            error: "Identifiants incorrects."
-          }, 401);
-        }
-
-        const session = await createSession(env.DB, user.id);
-
-        return response({
-          success: true,
-          user: {
-            nexora_id: user.nexora_id,
-            username: user.username,
-            display_name: user.display_name,
-          },
-          token: session.token,
-          expires_at: session.expiresAt,
-        });
+        return await handleLogin(request, env);
       }
 
       // CURRENT USER
@@ -425,9 +602,9 @@ export default {
         if (token) {
           const tokenHash = await sha256(token);
 
-          await env.DB.prepare(
-            "DELETE FROM sessions WHERE token_hash = ?"
-          ).bind(tokenHash).run();
+          await env.DB.prepare(`
+            DELETE FROM sessions WHERE token_hash = ?
+          `).bind(tokenHash).run();
         }
 
         return response({
@@ -436,19 +613,12 @@ export default {
         });
       }
 
-      // AUTHENTICATION FOR PRIVATE ROUTES
-      const messagingRoutes = [
-        "/api/users/search",
-        "/api/contacts",
-        "/api/conversations",
-        "/api/conversations/private",
-      ];
-
-      const isMessagingRoute =
-        messagingRoutes.includes(path);
-
-      if (isMessagingRoute) {
-        const currentUser = await authenticate(request, env.DB);
+      // PRIVATE ROUTES
+      if (path.startsWith("/api/")) {
+        const currentUser = await authenticate(
+          request,
+          env.DB
+        );
 
         if (!currentUser) {
           return response({
@@ -456,14 +626,14 @@ export default {
           }, 401);
         }
 
-        const result = await handleMessaging(
+        const result = await dispatchPrivateRoute(
           request,
           env,
           currentUser,
           path
         );
 
-        if (result) return result;
+        if (result) return withCors(result);
       }
 
       return response({
