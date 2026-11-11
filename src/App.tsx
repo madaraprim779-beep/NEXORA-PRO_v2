@@ -1,130 +1,812 @@
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
-  MessageCircle, Phone, Users, CircleDot,
-  Settings, Search, Plus, Video, Send,
-  Paperclip, Mic, MoreVertical
+  MessageCircle, Users, CircleDot, Phone, Settings, Search,
+  Plus, LogOut, RefreshCw, ShieldCheck, X
 } from "lucide-react";
 
-const contacts = [
-  { name: "Aminata", message: "On se parle ce soir ?", time: "10:42", color: "#a78bfa", online: true },
-  { name: "Yao", message: "Merci pour le message !", time: "09:35", color: "#38bdf8", online: true },
-  { name: "Sarah", message: "Photo envoyée", time: "Hier", color: "#fb7185", online: false },
-  { name: "Karim", message: "À bientôt !", time: "Hier", color: "#34d399", online: false },
-  { name: "David", message: "Tu es disponible ?", time: "Lun", color: "#fbbf24", online: false }
-];
+type User = {
+  id?: string;
+  nexora_id: string;
+  username: string;
+  display_name: string;
+};
+
+type Contact = User & {
+  avatar_url?: string | null;
+  is_online?: number | boolean;
+};
+
+type Conversation = {
+  conversation_id: string;
+  type: string;
+  title?: string | null;
+  participant_nexora_id?: string | null;
+  participant_username?: string | null;
+  participant_display_name?: string | null;
+  last_message?: string | null;
+  last_message_at?: string | null;
+};
+
+type Section =
+  | "Discussions"
+  | "Contacts"
+  | "Statuts"
+  | "Appels"
+  | "Paramètres";
+
+const API_URL = (
+  import.meta.env.VITE_API_URL || ""
+).replace(/\/$/, "");
+
+const TOKEN_KEY = "nexora_session_token";
+
+async function api<T>(
+  path: string,
+  token?: string,
+  options: RequestInit = {}
+): Promise<T> {
+  if (!API_URL) {
+    throw new Error(
+      "Adresse API non configurée. La variable VITE_API_URL doit être ajoutée."
+    );
+  }
+
+  const response = await fetch(API_URL + path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token
+        ? { Authorization: `Bearer ${token}` }
+        : {}),
+      ...(options.headers || {})
+    }
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data.error || "Une erreur est survenue."
+    );
+  }
+
+  return data as T;
+}
+
+function initials(value: string) {
+  return value.trim().slice(0, 1).toUpperCase() || "N";
+}
 
 export default function App() {
-  const [active, setActive] = useState("Discussions");
-  const [selected, setSelected] = useState("Aminata");
-  const [search, setSearch] = useState("");
-  const [message, setMessage] = useState("");
+  const [token, setToken] = useState(
+    () => localStorage.getItem(TOKEN_KEY) || ""
+  );
 
-  const current = contacts.find(c => c.name === selected)!;
+  const [user, setUser] = useState<User | null>(null);
+
+  const [authMode, setAuthMode] = useState<
+    "login" | "register"
+  >("login");
+
+  const [nexoraId, setNexoraId] = useState("");
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [section, setSection] =
+    useState<Section>("Discussions");
+
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [conversations, setConversations] =
+    useState<Conversation[]>([]);
+
+  const [search, setSearch] = useState("");
+  const [newContactId, setNewContactId] = useState("");
+  const [foundUser, setFoundUser] = useState<User | null>(null);
+
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const clearMessages = () => {
+    setError("");
+    setNotice("");
+  };
+
+  const loadWorkspace = useCallback(
+    async (session: string) => {
+      const [me, contactData, conversationData] =
+        await Promise.all([
+          api<{ user: User }>("/api/auth/me", session),
+          api<{ contacts: Contact[] }>(
+            "/api/contacts",
+            session
+          ),
+          api<{ conversations: Conversation[] }>(
+            "/api/conversations",
+            session
+          )
+        ]);
+
+      setUser(me.user);
+      setContacts(contactData.contacts || []);
+      setConversations(
+        conversationData.conversations || []
+      );
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!token) return;
+
+    let cancelled = false;
+
+    setLoading(true);
+
+    loadWorkspace(token)
+      .catch((e: Error) => {
+        if (cancelled) return;
+
+        localStorage.removeItem(TOKEN_KEY);
+        setToken("");
+        setUser(null);
+        setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, loadWorkspace]);
+
+  const filteredConversations = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return conversations.filter((c) =>
+      [
+        c.participant_display_name,
+        c.participant_username,
+        c.participant_nexora_id,
+        c.last_message
+      ].some((value) =>
+        (value || "").toLowerCase().includes(q)
+      )
+    );
+  }, [conversations, search]);
+
+  const filteredContacts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return contacts.filter((c) =>
+      [
+        c.display_name,
+        c.username,
+        c.nexora_id
+      ].some((value) =>
+        value.toLowerCase().includes(q)
+      )
+    );
+  }, [contacts, search]);
+
+  async function submitAuth(event: FormEvent) {
+    event.preventDefault();
+    clearMessages();
+    setBusy(true);
+
+    try {
+      const body =
+        authMode === "login"
+          ? {
+              nexora_id: nexoraId.trim().toUpperCase(),
+              password
+            }
+          : {
+              username: username.trim(),
+              display_name: displayName.trim(),
+              password
+            };
+
+      const result = await api<{
+        token: string;
+        user: User;
+      }>(
+        authMode === "login"
+          ? "/api/auth/login"
+          : "/api/auth/register",
+        undefined,
+        {
+          method: "POST",
+          body: JSON.stringify(body)
+        }
+      );
+
+      localStorage.setItem(TOKEN_KEY, result.token);
+      setUser(result.user);
+      setToken(result.token);
+      setPassword("");
+
+      setNotice(
+        authMode === "register"
+          ? "Compte créé. Conserve ton NEXORA ID."
+          : "Connexion réussie."
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refresh() {
+    if (!token) return;
+
+    clearMessages();
+    setBusy(true);
+
+    try {
+      await loadWorkspace(token);
+      setNotice("Données actualisées.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function searchUser(event: FormEvent) {
+    event.preventDefault();
+
+    clearMessages();
+    setFoundUser(null);
+    setBusy(true);
+
+    try {
+      const result = await api<{
+        found: boolean;
+        user: User | null;
+      }>(
+        "/api/users/search?nexora_id=" +
+          encodeURIComponent(
+            newContactId.trim().toUpperCase()
+          ),
+        token
+      );
+
+      if (!result.found || !result.user) {
+        setNotice(
+          "Aucun compte trouvé avec ce NEXORA ID."
+        );
+      } else {
+        setFoundUser(result.user);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addContact() {
+    if (!foundUser) return;
+
+    clearMessages();
+    setBusy(true);
+
+    try {
+      await api("/api/contacts", token, {
+        method: "POST",
+        body: JSON.stringify({
+          nexora_id: foundUser.nexora_id
+        })
+      });
+
+      await api("/api/conversations/private", token, {
+        method: "POST",
+        body: JSON.stringify({
+          nexora_id: foundUser.nexora_id
+        })
+      });
+
+      await loadWorkspace(token);
+
+      setFoundUser(null);
+      setNewContactId("");
+      setSection("Discussions");
+
+      setNotice(
+        "Contact ajouté. Conversation créée."
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    try {
+      await api("/api/auth/logout", token, {
+        method: "POST"
+      });
+    } catch {
+      // La déconnexion locale reste possible.
+    }
+
+    localStorage.removeItem(TOKEN_KEY);
+    setToken("");
+    setUser(null);
+    setContacts([]);
+    setConversations([]);
+    setSection("Discussions");
+  }
+
+  if (!token || !user) {
+    return (
+      <main className="auth-shell">
+        <div className="auth-brand">
+          <span className="brand-mark">N</span>
+          <span>NEXORA</span>
+        </div>
+
+        <section className="auth-card">
+          <div className="eyebrow">
+            <ShieldCheck size={15} />
+            MESSAGERIE PRIVÉE
+          </div>
+
+          <h1>
+            {authMode === "login"
+              ? "Bienvenue."
+              : "Créer votre compte."}
+          </h1>
+
+          <p className="muted">
+            {authMode === "login"
+              ? "Connectez-vous avec votre NEXORA ID."
+              : "Créez votre identité NEXORA."}
+          </p>
+
+          <div className="auth-switch">
+            <button
+              className={
+                authMode === "login" ? "active" : ""
+              }
+              onClick={() => {
+                setAuthMode("login");
+                clearMessages();
+              }}
+            >
+              Connexion
+            </button>
+
+            <button
+              className={
+                authMode === "register" ? "active" : ""
+              }
+              onClick={() => {
+                setAuthMode("register");
+                clearMessages();
+              }}
+            >
+              Inscription
+            </button>
+          </div>
+
+          <form
+            onSubmit={submitAuth}
+            className="auth-form"
+          >
+            {authMode === "register" ? (
+              <>
+                <label>
+                  Pseudo
+                  <input
+                    required
+                    minLength={3}
+                    maxLength={24}
+                    pattern="[A-Za-z0-9_]+"
+                    value={username}
+                    onChange={(e) =>
+                      setUsername(e.target.value)
+                    }
+                    placeholder="Votre_pseudo"
+                  />
+                </label>
+
+                <label>
+                  Nom affiché
+                  <input
+                    required
+                    maxLength={40}
+                    value={displayName}
+                    onChange={(e) =>
+                      setDisplayName(e.target.value)
+                    }
+                    placeholder="Votre nom"
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                NEXORA ID
+                <input
+                  required
+                  value={nexoraId}
+                  onChange={(e) =>
+                    setNexoraId(
+                      e.target.value.toUpperCase()
+                    )
+                  }
+                  placeholder="NXR-XXXXXXXX"
+                />
+              </label>
+            )}
+
+            <label>
+              Mot de passe
+              <input
+                required
+                minLength={
+                  authMode === "register" ? 8 : 1
+                }
+                type="password"
+                value={password}
+                onChange={(e) =>
+                  setPassword(e.target.value)
+                }
+                placeholder="Mot de passe"
+              />
+            </label>
+
+            {error && (
+              <p className="feedback error">{error}</p>
+            )}
+
+            {notice && (
+              <p className="feedback success">
+                {notice}
+              </p>
+            )}
+
+            <button
+              className="primary-btn"
+              disabled={busy}
+            >
+              {busy
+                ? "Veuillez patienter…"
+                : authMode === "login"
+                  ? "Se connecter"
+                  : "Créer mon compte"}
+            </button>
+          </form>
+
+          <p className="auth-foot">
+            Aucun contact ni message fictif.
+          </p>
+        </section>
+
+        <span className="version-label">
+          NEXORA PRO · ESPACE SÉCURISÉ
+        </span>
+      </main>
+    );
+  }
+
+  const navItems = [
+    { label: "Discussions" as Section, icon: MessageCircle },
+    { label: "Contacts" as Section, icon: Users },
+    { label: "Statuts" as Section, icon: CircleDot },
+    { label: "Appels" as Section, icon: Phone },
+    { label: "Paramètres" as Section, icon: Settings }
+  ];
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">N<span>✦</span></div>
+    <main className="app-shell">
+      <aside className="rail">
+        <div className="brand-mark">N</div>
 
-        <nav>
-          {[
-            ["Discussions", MessageCircle],
-            ["Statuts", CircleDot],
-            ["Appels", Phone],
-            ["Communautés", Users],
-            ["Paramètres", Settings]
-          ].map(([name, Icon]: any) => (
+        <nav className="rail-nav">
+          {navItems.map(({ label, icon: Icon }) => (
             <button
-              className={active === name ? "nav active" : "nav"}
-              onClick={() => setActive(name)}
-              key={name}
-              title={name}
+              key={label}
+              className={
+                section === label
+                  ? "rail-item active"
+                  : "rail-item"
+              }
+              onClick={() => setSection(label)}
+              title={label}
             >
-              <Icon size={22} />
-              <span>{name}</span>
+              <Icon size={20} />
+              <span>{label}</span>
             </button>
           ))}
         </nav>
 
-        <div className="profile">M</div>
+        <button
+          className="rail-profile"
+          onClick={() => setSection("Paramètres")}
+          title="Mon profil"
+        >
+          {initials(user.display_name)}
+        </button>
       </aside>
 
-      <section className="chats">
-        <header>
+      <section className="list-panel">
+        <header className="panel-header">
           <div>
-            <h1>NEXORA</h1>
-            <small>Connect without limits.</small>
+            <div className="eyebrow">
+              ESPACE PERSONNEL
+            </div>
+            <h1>{section}</h1>
           </div>
-          <button className="round"><Plus /></button>
-        </header>
 
-        <div className="search">
-          <Search size={18} />
-          <input
-            placeholder="Rechercher une discussion"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-        </div>
-
-        <h3>{active}</h3>
-
-        {contacts.filter(c =>
-          c.name.toLowerCase().includes(search.toLowerCase())
-        ).map(c => (
           <button
-            className={"contact " + (selected === c.name ? "selected" : "")}
-            onClick={() => setSelected(c.name)}
-            key={c.name}
+            className="icon-btn"
+            onClick={refresh}
+            disabled={busy}
+            title="Actualiser"
           >
-            <div className="avatar" style={{ background: c.color }}>
-              {c.name[0]}
-              {c.online && <i />}
-            </div>
-            <div className="contact-info">
-              <strong>{c.name}</strong>
-              <small>{c.message}</small>
-            </div>
-            <time>{c.time}</time>
+            <RefreshCw size={18} />
           </button>
-        ))}
-      </section>
-
-      <section className="conversation">
-        <header className="conversation-head">
-          <div className="avatar" style={{ background: current.color }}>
-            {current.name[0]}
-          </div>
-          <div className="contact-info">
-            <strong>{current.name}</strong>
-            <small>{current.online ? "En ligne" : "Hors ligne"}</small>
-          </div>
-          <button className="round"><Phone /></button>
-          <button className="round"><Video /></button>
-          <button className="round"><MoreVertical /></button>
         </header>
 
-        <div className="empty-chat">
-          <div className="logo-large">N✦</div>
-          <h2>NEXORA PRO</h2>
-          <p>Vos conversations, en toute simplicité.</p>
+        {section !== "Paramètres" &&
+          section !== "Statuts" &&
+          section !== "Appels" && (
+            <div className="search-box">
+              <Search size={17} />
+              <input
+                value={search}
+                onChange={(e) =>
+                  setSearch(e.target.value)
+                }
+                placeholder="Rechercher"
+              />
+            </div>
+          )}
+
+        {section === "Discussions" && (
+          <>
+            <div className="section-caption">
+              MES CONVERSATIONS
+            </div>
+
+            {loading ? (
+              <div className="empty-state">
+                Chargement…
+              </div>
+            ) : filteredConversations.length === 0 ? (
+              <div className="empty-state">
+                <MessageCircle size={28} />
+                <strong>Aucune discussion</strong>
+                <span>
+                  Ajoute un contact avec son NEXORA ID
+                  pour commencer.
+                </span>
+                <button
+                  className="text-action"
+                  onClick={() => setSection("Contacts")}
+                >
+                  Ajouter un contact
+                </button>
+              </div>
+            ) : (
+              filteredConversations.map((c) => (
+                <div
+                  className="list-entry"
+                  key={c.conversation_id}
+                >
+                  <div className="avatar">
+                    {initials(
+                      c.participant_display_name ||
+                        c.participant_username ||
+                        "N"
+                    )}
+                  </div>
+
+                  <div className="entry-copy">
+                    <strong>
+                      {c.participant_display_name ||
+                        c.title ||
+                        "Conversation"}
+                    </strong>
+                    <span>
+                      {c.last_message ||
+                        c.participant_nexora_id ||
+                        "Aucun message"}
+                    </span>
+                  </div>
+
+                  <span className="entry-time">
+                    {c.last_message_at
+                      ? new Date(
+                          c.last_message_at
+                        ).toLocaleDateString("fr-FR")
+                      : ""}
+                  </span>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {section === "Contacts" && (
+          <>
+            <div className="section-caption">
+              AJOUTER UN UTILISATEUR
+            </div>
+
+            <form
+              className="add-contact-form"
+              onSubmit={searchUser}
+            >
+              <label htmlFor="contact-id">
+                NEXORA ID
+              </label>
+
+              <div className="inline-field">
+                <input
+                  id="contact-id"
+                  value={newContactId}
+                  onChange={(e) =>
+                    setNewContactId(
+                      e.target.value.toUpperCase()
+                    )
+                  }
+                  placeholder="NXR-XXXXXXXX"
+                />
+
+                <button
+                  disabled={busy || !newContactId.trim()}
+                >
+                  <Search size={17} />
+                </button>
+              </div>
+            </form>
+
+            {foundUser && (
+              <div className="found-user">
+                <div className="avatar">
+                  {initials(foundUser.display_name)}
+                </div>
+
+                <div className="entry-copy">
+                  <strong>
+                    {foundUser.display_name}
+                  </strong>
+                  <span>
+                    @{foundUser.username}
+                  </span>
+                  <span>{foundUser.nexora_id}</span>
+                </div>
+
+                <button
+                  className="primary-small"
+                  onClick={addContact}
+                  disabled={busy}
+                >
+                  Ajouter
+                </button>
+              </div>
+            )}
+
+            <div className="section-caption">
+              MES CONTACTS · {contacts.length}
+            </div>
+
+            {filteredContacts.length === 0 ? (
+              <div className="empty-state">
+                <Users size={26} />
+                <strong>Aucun contact enregistré</strong>
+                <span>
+                  Les comptes réels apparaîtront ici
+                  après leur ajout.
+                </span>
+              </div>
+            ) : (
+              filteredContacts.map((c) => (
+                <div
+                  className="list-entry"
+                  key={c.nexora_id}
+                >
+                  <div className="avatar">
+                    {initials(c.display_name)}
+                  </div>
+
+                  <div className="entry-copy">
+                    <strong>{c.display_name}</strong>
+                    <span>@{c.username}</span>
+                    <span>{c.nexora_id}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {section === "Statuts" && (
+          <div className="empty-state">
+            <CircleDot size={28} />
+            <strong>Statuts</strong>
+            <span>
+              Aucun statut disponible.
+            </span>
+          </div>
+        )}
+
+        {section === "Appels" && (
+          <div className="empty-state">
+            <Phone size={28} />
+            <strong>Appels</strong>
+            <span>
+              Le système d'appels audio et vidéo
+              n'est pas encore opérationnel.
+            </span>
+          </div>
+        )}
+
+        {section === "Paramètres" && (
+          <div className="settings-card">
+            <div className="avatar large">
+              {initials(user.display_name)}
+            </div>
+
+            <h2>{user.display_name}</h2>
+            <p>@{user.username}</p>
+
+            <div className="id-box">
+              <span>VOTRE NEXORA ID</span>
+              <strong>{user.nexora_id}</strong>
+            </div>
+
+            <button
+              className="logout-btn"
+              onClick={logout}
+            >
+              <LogOut size={17} />
+              Se déconnecter
+            </button>
+          </div>
+        )}
+      </section>
+
+      <section className="workspace">
+        <div className="workspace-top">
+          <div className="workspace-logo">N</div>
+          <div>
+            <strong>NEXORA PRO</strong>
+            <span>Messagerie personnelle</span>
+          </div>
         </div>
 
-        <form className="composer" onSubmit={e => {
-          e.preventDefault();
-          setMessage("");
-        }}>
-          <button type="button"><Paperclip /></button>
-          <input
-            placeholder="Écrire un message..."
-            value={message}
-            onChange={e => setMessage(e.target.value)}
-          />
-          <button type="button"><Mic /></button>
-          <button type="submit"><Send /></button>
-        </form>
+        <div className="workspace-center">
+          <div className="workspace-emblem">N</div>
+          <h2>Votre espace de discussion</h2>
+          <p>
+            Vos conversations réelles apparaîtront ici.
+          </p>
+          <span>
+            Connecté en tant que {user.display_name}
+          </span>
+        </div>
+
+        {(error || notice) && (
+          <div className={error ? "toast error" : "toast"}>
+            {error || notice}
+            <button onClick={clearMessages}>
+              <X size={15} />
+            </button>
+          </div>
+        )}
       </section>
-    </div>
+    </main>
   );
 }
