@@ -2,7 +2,7 @@
 PRAGMA foreign_keys = ON;
 
 -- =====================================
--- 1. UTILISATEURS ET PROFILS
+-- 1. PROFILS UTILISATEURS
 -- =====================================
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_profiles_display_name
 ON profiles(display_name);
 
 -- =====================================
--- 2. IDENTIFIANTS DE CONNEXION
+-- 2. IDENTIFIANTS
 -- =====================================
 
 CREATE TABLE IF NOT EXISTS credentials (
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS status_views (
 );
 
 -- =====================================
--- 11. REACTIONS AUX MESSAGES
+-- 11. RÉACTIONS AUX MESSAGES
 -- =====================================
 
 CREATE TABLE IF NOT EXISTS message_reactions (
@@ -226,5 +226,70 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 -- =====================================
--- FIN DU SCHEMA NEXORA PRO
+-- 14. PARAMÈTRES DE CONFIDENTIALITÉ
+-- =====================================
+
+CREATE TABLE IF NOT EXISTS privacy_settings (
+  user_id TEXT PRIMARY KEY,
+  last_seen TEXT NOT NULL DEFAULT 'everyone',
+  profile_photo TEXT NOT NULL DEFAULT 'everyone',
+  status_visibility TEXT NOT NULL DEFAULT 'contacts',
+  read_receipts INTEGER NOT NULL DEFAULT 1,
+  disappearing_seconds INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id)
+    REFERENCES profiles(id) ON DELETE CASCADE
+);
+
+-- =====================================
+-- 15. ACCUSÉS DE LECTURE
+-- =====================================
+
+CREATE TABLE IF NOT EXISTS message_reads (
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  read_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, user_id),
+  FOREIGN KEY (message_id)
+    REFERENCES messages(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id)
+    REFERENCES profiles(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_reads_user
+ON message_reads(user_id, read_at);
+
+-- =====================================
+-- 16. HISTORIQUE DES APPELS
+-- =====================================
+
+CREATE TABLE IF NOT EXISTS calls (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  initiator_id TEXT NOT NULL,
+  call_type TEXT NOT NULL
+    CHECK (call_type IN ('audio', 'video')),
+  status TEXT NOT NULL DEFAULT 'ringing'
+    CHECK (status IN (
+      'ringing',
+      'accepted',
+      'rejected',
+      'ended',
+      'missed'
+    )),
+  started_at TEXT,
+  ended_at TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (conversation_id)
+    REFERENCES conversations(id) ON DELETE CASCADE,
+  FOREIGN KEY (initiator_id)
+    REFERENCES profiles(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calls_conversation
+ON calls(conversation_id, created_at);
+
+-- =====================================
+-- FIN DU SCHEMA NEXORA PRO V2
+-- 16 TABLES
 -- =====================================
