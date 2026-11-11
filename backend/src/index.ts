@@ -1,6 +1,15 @@
 
+import { handleMessaging } from "./messaging";
+
 interface Env {
   DB: D1Database;
+}
+
+interface AuthUser {
+  id: string;
+  nexora_id: string;
+  username: string;
+  display_name: string;
 }
 
 const corsHeaders = {
@@ -8,22 +17,6 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
-
-const EXPECTED_TABLES = [
-  "profiles",
-  "credentials",
-  "sessions",
-  "conversations",
-  "conversation_members",
-  "messages",
-  "contacts",
-  "blocks",
-  "statuses",
-  "status_views",
-  "message_reactions",
-  "notifications",
-  "reports",
-];
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -50,7 +43,8 @@ function decodeBase64Url(value: string): Uint8Array {
     .replace(/-/g, "+")
     .replace(/_/g, "/");
 
-  const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
+  const padded =
+    base64 + "=".repeat((4 - base64.length % 4) % 4);
 
   return Uint8Array.from(
     atob(padded),
@@ -114,7 +108,7 @@ async function createNexoraId(db: D1Database): Promise<string> {
     if (!existing) return id;
   }
 
-  throw new Error("Impossible de générer un identifiant unique.");
+  throw new Error("Impossible de générer un NEXORA ID.");
 }
 
 function getToken(request: Request): string | null {
@@ -136,59 +130,69 @@ async function createSession(db: D1Database, userId: string) {
     Date.now() + 30 * 24 * 60 * 60 * 1000
   ).toISOString();
 
-  await db
-    .prepare(`
-      INSERT INTO sessions
-      (id, user_id, token_hash, expires_at)
-      VALUES (?, ?, ?, ?)
-    `)
-    .bind(sessionId, userId, tokenHash, expiresAt)
-    .run();
+  await db.prepare(`
+    INSERT INTO sessions
+    (id, user_id, token_hash, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(sessionId, userId, tokenHash, expiresAt).run();
 
   return { token, expiresAt };
 }
 
-async function authenticate(request: Request, db: D1Database) {
+async function authenticate(
+  request: Request,
+  db: D1Database
+): Promise<AuthUser | null> {
   const token = getToken(request);
-
   if (!token) return null;
 
   const tokenHash = await sha256(token);
 
-  return db
-    .prepare(`
-      SELECT
-        profiles.id,
-        profiles.nexora_id,
-        profiles.username,
-        profiles.display_name
-      FROM sessions
-      JOIN profiles ON profiles.id = sessions.user_id
-      WHERE sessions.token_hash = ?
+  return db.prepare(`
+    SELECT
+      profiles.id,
+      profiles.nexora_id,
+      profiles.username,
+      profiles.display_name
+    FROM sessions
+    JOIN profiles ON profiles.id = sessions.user_id
+    WHERE sessions.token_hash = ?
       AND sessions.expires_at > ?
-    `)
-    .bind(tokenHash, new Date().toISOString())
-    .first();
+  `).bind(
+    tokenHash,
+    new Date().toISOString()
+  ).first<AuthUser>();
 }
 
 async function handleHealth(db: D1Database): Promise<Response> {
-  const result = await db
-    .prepare(`
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'table'
-      AND name IN (
-        ${EXPECTED_TABLES.map(() => "?").join(",")}
-      )
-    `)
-    .bind(...EXPECTED_TABLES)
-    .all<{ name: string }>();
+  const expectedTables = [
+    "profiles",
+    "credentials",
+    "sessions",
+    "conversations",
+    "conversation_members",
+    "messages",
+    "contacts",
+    "blocks",
+    "statuses",
+    "status_views",
+    "message_reactions",
+    "notifications",
+    "reports",
+  ];
+
+  const result = await db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN (${expectedTables.map(() => "?").join(",")})
+  `).bind(...expectedTables).all<{ name: string }>();
 
   const foundTables = (result.results ?? []).map(
     (table) => table.name
   );
 
-  const missingTables = EXPECTED_TABLES.filter(
+  const missingTables = expectedTables.filter(
     (table) => !foundTables.includes(table)
   );
 
@@ -198,10 +202,18 @@ async function handleHealth(db: D1Database): Promise<Response> {
     server: "online",
     database: "connected",
     tables_found: foundTables.length,
-    tables_expected: EXPECTED_TABLES.length,
+    tables_expected: expectedTables.length,
     missing_tables: missingTables,
     timestamp: new Date().toISOString(),
   });
+}
+
+async function readJson(request: Request): Promise<any> {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
 }
 
 export default {
@@ -227,11 +239,11 @@ export default {
         request.method === "POST" &&
         path === "/api/auth/register"
       ) {
-        const body = await request.json() as {
-          username?: string;
-          display_name?: string;
-          password?: string;
-        };
+        const body = await readJson(request);
+
+        if (!body) {
+          return response({ error: "Données invalides." }, 400);
+        }
 
         const username = body.username?.trim();
         const displayName = body.display_name?.trim();
@@ -242,16 +254,13 @@ export default {
           !/^[A-Za-z0-9_]{3,24}$/.test(username)
         ) {
           return response({
-            error: "Le pseudo doit contenir 3 à 24 caractères : lettres, chiffres ou underscore."
+            error: "Pseudo invalide : 3 à 24 caractères."
           }, 400);
         }
 
-        if (
-          !displayName ||
-          displayName.length > 40
-        ) {
+        if (!displayName || displayName.length > 40) {
           return response({
-            error: "Le nom d'affichage est invalide."
+            error: "Nom d'affichage invalide."
           }, 400);
         }
 
@@ -261,7 +270,7 @@ export default {
           password.length > 128
         ) {
           return response({
-            error: "Le mot de passe doit contenir entre 8 et 128 caractères."
+            error: "Mot de passe invalide."
           }, 400);
         }
 
@@ -316,10 +325,11 @@ export default {
         request.method === "POST" &&
         path === "/api/auth/login"
       ) {
-        const body = await request.json() as {
-          nexora_id?: string;
-          password?: string;
-        };
+        const body = await readJson(request);
+
+        if (!body) {
+          return response({ error: "Données invalides." }, 400);
+        }
 
         const nexoraId = body.nexora_id?.trim().toUpperCase();
         const password = body.password;
@@ -424,6 +434,36 @@ export default {
           success: true,
           message: "Déconnexion effectuée.",
         });
+      }
+
+      // AUTHENTICATION FOR PRIVATE ROUTES
+      const messagingRoutes = [
+        "/api/users/search",
+        "/api/contacts",
+        "/api/conversations",
+        "/api/conversations/private",
+      ];
+
+      const isMessagingRoute =
+        messagingRoutes.includes(path);
+
+      if (isMessagingRoute) {
+        const currentUser = await authenticate(request, env.DB);
+
+        if (!currentUser) {
+          return response({
+            error: "Authentification requise."
+          }, 401);
+        }
+
+        const result = await handleMessaging(
+          request,
+          env,
+          currentUser,
+          path
+        );
+
+        if (result) return result;
       }
 
       return response({
