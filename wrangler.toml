@@ -6,4 +6,4 @@ compatibility_date = "2026-11-11"
 [[d1_databases]]
 binding = "DB"
 database_name = "nexora-pro"
-database_id = "REMPLACER_PAR_ID_D1"
+database_id = "e283361d-4821-4a9a-bddf-26ce462347f6"
