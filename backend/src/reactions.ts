@@ -10,6 +10,15 @@ export interface ReactionUser {
   display_name: string;
 }
 
+interface MessageAccess {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  deleted_at: string | null;
+}
+
+const MAX_REACTION_LENGTH = 8;
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -25,7 +34,7 @@ async function getMessageAccess(
   db: D1Database,
   messageId: string,
   userId: string
-): Promise<any> {
+): Promise<MessageAccess | null> {
   return db.prepare(`
     SELECT
       m.id,
@@ -33,12 +42,12 @@ async function getMessageAccess(
       m.sender_id,
       m.deleted_at
     FROM messages m
-    JOIN conversation_members cm
+    INNER JOIN conversation_members cm
       ON cm.conversation_id = m.conversation_id
     WHERE m.id = ?
       AND cm.user_id = ?
     LIMIT 1
-  `).bind(messageId, userId).first();
+  `).bind(messageId, userId).first<MessageAccess>();
 }
 
 async function isBlocked(
@@ -49,23 +58,43 @@ async function isBlocked(
   const result = await db.prepare(`
     SELECT 1
     FROM conversation_members mine
-    JOIN conversation_members other
+    INNER JOIN conversation_members other
       ON other.conversation_id = mine.conversation_id
-    JOIN blocks b
+    INNER JOIN blocks b
       ON (
-        (b.blocker_id = mine.user_id AND b.blocked_id = other.user_id)
+        (b.blocker_id = mine.user_id
+          AND b.blocked_id = other.user_id)
         OR
-        (b.blocker_id = other.user_id AND b.blocked_id = mine.user_id)
+        (b.blocker_id = other.user_id
+          AND b.blocked_id = mine.user_id)
       )
     WHERE mine.conversation_id = ?
       AND mine.user_id = ?
+      AND other.user_id != mine.user_id
     LIMIT 1
   `).bind(conversationId, userId).first();
 
   return Boolean(result);
 }
 
-// Ajouter ou modifier une réaction
+function validateReaction(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const emoji = value.trim();
+
+  if (
+    emoji.length === 0 ||
+    [...emoji].length > MAX_REACTION_LENGTH ||
+    /[\u0000-\u001F\u007F]/.test(emoji)
+  ) {
+    return null;
+  }
+
+  return emoji;
+}
+
 async function addReaction(
   request: Request,
   env: ReactionEnv,
@@ -79,11 +108,15 @@ async function addReaction(
   );
 
   if (!message) {
-    return json({ error: "Message introuvable ou accès refusé." }, 404);
+    return json({
+      error: "Message introuvable ou accès refusé."
+    }, 404);
   }
 
   if (message.deleted_at) {
-    return json({ error: "Ce message a été supprimé." }, 410);
+    return json({
+      error: "Ce message a été supprimé."
+    }, 410);
   }
 
   if (await isBlocked(
@@ -91,42 +124,54 @@ async function addReaction(
     message.conversation_id,
     user.id
   )) {
-    return json({ error: "Action indisponible." }, 403);
+    return json({
+      error: "Action indisponible."
+    }, 403);
   }
 
-  let data: any;
+  let data: unknown;
 
   try {
     data = await request.json();
   } catch {
-    return json({ error: "Données invalides." }, 400);
+    return json({
+      error: "Données invalides."
+    }, 400);
   }
 
-  const reaction = data?.reaction;
+  const reaction = validateReaction(
+    (data as { reaction?: unknown } | null)?.reaction
+  );
 
-  if (typeof reaction !== "string") {
-    return json({ error: "Réaction obligatoire." }, 400);
+  if (!reaction) {
+    return json({
+      error: "Réaction invalide."
+    }, 400);
   }
 
-  const emoji = reaction.trim();
-
-  if (
-    !emoji ||
-    [...emoji].length > 8 ||
-    /[\u0000-\u001F]/.test(emoji)
-  ) {
-    return json({ error: "Réaction invalide." }, 400);
+  try {
+    await env.DB.prepare(`
+      INSERT INTO message_reactions (
+        message_id,
+        user_id,
+        reaction,
+        created_at
+      )
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(message_id, user_id)
+      DO UPDATE SET
+        reaction = excluded.reaction,
+        created_at = CURRENT_TIMESTAMP
+    `).bind(
+      messageId,
+      user.id,
+      reaction
+    ).run();
+  } catch {
+    return json({
+      error: "Impossible d'enregistrer la réaction."
+    }, 500);
   }
-
-  await env.DB.prepare(`
-    INSERT INTO message_reactions
-      (message_id, user_id, reaction, created_at)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(message_id, user_id)
-    DO UPDATE SET
-      reaction = excluded.reaction,
-      created_at = CURRENT_TIMESTAMP
-  `).bind(messageId, user.id, emoji).run();
 
   return json({
     success: true,
@@ -134,12 +179,11 @@ async function addReaction(
     reaction: {
       message_id: messageId,
       user_id: user.id,
-      emoji
+      emoji: reaction
     }
   });
 }
 
-// Voir les réactions d'un message
 async function listReactions(
   env: ReactionEnv,
   user: ReactionUser,
@@ -152,31 +196,40 @@ async function listReactions(
   );
 
   if (!message) {
-    return json({ error: "Message introuvable ou accès refusé." }, 404);
+    return json({
+      error: "Message introuvable ou accès refusé."
+    }, 404);
   }
 
   if (message.deleted_at) {
-    return json({ error: "Ce message a été supprimé." }, 410);
+    return json({
+      error: "Ce message a été supprimé."
+    }, 410);
   }
 
   const reactions = await env.DB.prepare(`
     SELECT
       mr.reaction,
       COUNT(*) AS total,
-      SUM(CASE WHEN mr.user_id = ? THEN 1 ELSE 0 END) AS reacted_by_me
+      MAX(
+        CASE WHEN mr.user_id = ? THEN 1 ELSE 0 END
+      ) AS reacted_by_me
     FROM message_reactions mr
     WHERE mr.message_id = ?
     GROUP BY mr.reaction
-    ORDER BY total DESC
-  `).bind(user.id, messageId).all();
+    ORDER BY total DESC, mr.reaction ASC
+  `).bind(
+    user.id,
+    messageId
+  ).all();
 
   return json({
     success: true,
+    message_id: messageId,
     reactions: reactions.results || []
   });
 }
 
-// Retirer sa réaction
 async function removeReaction(
   env: ReactionEnv,
   user: ReactionUser,
@@ -189,7 +242,9 @@ async function removeReaction(
   );
 
   if (!message) {
-    return json({ error: "Message introuvable ou accès refusé." }, 404);
+    return json({
+      error: "Message introuvable ou accès refusé."
+    }, 404);
   }
 
   if (await isBlocked(
@@ -197,13 +252,19 @@ async function removeReaction(
     message.conversation_id,
     user.id
   )) {
-    return json({ error: "Action indisponible." }, 403);
+    return json({
+      error: "Action indisponible."
+    }, 403);
   }
 
   await env.DB.prepare(`
     DELETE FROM message_reactions
-    WHERE message_id = ? AND user_id = ?
-  `).bind(messageId, user.id).run();
+    WHERE message_id = ?
+      AND user_id = ?
+  `).bind(
+    messageId,
+    user.id
+  ).run();
 
   return json({
     success: true,
@@ -211,34 +272,46 @@ async function removeReaction(
   });
 }
 
-// Routeur des réactions
 export async function handleReactions(
   request: Request,
   env: ReactionEnv,
   user: ReactionUser,
   path: string
 ): Promise<Response | null> {
-  const method = request.method;
-
   const match = path.match(
     /^\/api\/messages\/([a-zA-Z0-9_-]+)\/reactions$/
   );
 
-  if (!match) return null;
+  if (!match) {
+    return null;
+  }
 
   const messageId = match[1];
 
-  if (method === "POST") {
-    return addReaction(request, env, user, messageId);
-  }
+  switch (request.method) {
+    case "POST":
+      return addReaction(
+        request,
+        env,
+        user,
+        messageId
+      );
 
-  if (method === "GET") {
-    return listReactions(env, user, messageId);
-  }
+    case "GET":
+      return listReactions(
+        env,
+        user,
+        messageId
+      );
 
-  if (method === "DELETE") {
-    return removeReaction(env, user, messageId);
-  }
+    case "DELETE":
+      return removeReaction(
+        env,
+        user,
+        messageId
+      );
 
-  return null;
+    default:
+      return null;
+  }
 }
