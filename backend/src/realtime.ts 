@@ -1,0 +1,246 @@
+
+export interface RealtimeEnv {
+  DB: D1Database;
+  REALTIME: DurableObjectNamespace;
+}
+
+export interface RealtimeUser {
+  id: string;
+}
+
+interface RealtimeAttachment {
+  userId: string;
+  conversationId: string;
+}
+
+const ALLOWED_EVENTS = new Set([
+  "typing:start",
+  "typing:stop",
+  "call:offer",
+  "call:answer",
+  "call:ice",
+  "call:end"
+]);
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+
+/**
+ * Durable Object : une instance par conversation.
+ * Elle distribue les événements aux WebSockets connectés.
+ */
+export class RealtimeRoom {
+  private state: DurableObjectState;
+
+  constructor(state: DurableObjectState, _env: RealtimeEnv) {
+    this.state = state;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return json({ error: "Connexion WebSocket requise." }, 426);
+    }
+
+    const userId = request.headers.get("X-Nexora-User");
+    const conversationId = request.headers.get("X-Nexora-Conversation");
+
+    if (!userId || !conversationId) {
+      return json({ error: "Connexion non autorisée." }, 401);
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    const attachment: RealtimeAttachment = {
+      userId,
+      conversationId
+    };
+
+    server.serializeAttachment(attachment);
+    this.state.acceptWebSocket(server);
+
+    server.send(JSON.stringify({
+      type: "realtime:connected",
+      conversation_id: conversationId
+    }));
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+
+  async webSocketMessage(
+    socket: WebSocket,
+    message: string | ArrayBuffer
+  ): Promise<void> {
+    let raw: string;
+
+    if (typeof message === "string") {
+      raw = message;
+    } else {
+      raw = new TextDecoder().decode(message);
+    }
+
+    if (raw.length > 32_000) {
+      socket.close(1009, "Message trop volumineux");
+      return;
+    }
+
+    let data: any;
+
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      socket.send(JSON.stringify({
+        type: "error",
+        message: "Format JSON invalide."
+      }));
+      return;
+    }
+
+    const attachment =
+      socket.deserializeAttachment() as RealtimeAttachment | null;
+
+    if (!attachment?.userId || !attachment?.conversationId) {
+      socket.close(1008, "Session invalide");
+      return;
+    }
+
+    if (
+      typeof data?.type !== "string" ||
+      !ALLOWED_EVENTS.has(data.type)
+    ) {
+      socket.send(JSON.stringify({
+        type: "error",
+        message: "Événement non autorisé."
+      }));
+      return;
+    }
+
+    const outgoing = JSON.stringify({
+      type: data.type,
+      conversation_id: attachment.conversationId,
+      sender_id: attachment.userId,
+      payload: data.payload ?? null,
+      timestamp: new Date().toISOString()
+    });
+
+    for (const connectedSocket of this.state.getWebSockets()) {
+      try {
+        connectedSocket.send(outgoing);
+      } catch {
+        // Une connexion fermée sera nettoyée par Cloudflare.
+      }
+    }
+  }
+
+  async webSocketClose(
+    socket: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    try {
+      socket.close(code, reason);
+    } catch {
+      // Connexion déjà fermée.
+    }
+  }
+
+  async webSocketError(socket: WebSocket): Promise<void> {
+    try {
+      socket.close(1011, "Erreur de connexion");
+    } catch {
+      // Connexion déjà fermée.
+    }
+  }
+}
+
+/**
+ * Vérifie l'appartenance à la conversation avant
+ * d'autoriser l'ouverture du WebSocket.
+ */
+async function isConversationMember(
+  env: RealtimeEnv,
+  conversationId: string,
+  userId: string
+): Promise<boolean> {
+  const result = await env.DB.prepare(`
+    SELECT 1
+    FROM conversation_members
+    WHERE conversation_id = ?
+      AND user_id = ?
+    LIMIT 1
+  `).bind(conversationId, userId).first();
+
+  return !!result;
+}
+
+export async function handleRealtime(
+  request: Request,
+  env: RealtimeEnv,
+  currentUser: RealtimeUser,
+  path: string
+): Promise<Response | null> {
+  if (request.method !== "GET") return null;
+
+  const prefix = "/api/realtime/";
+  if (!path.startsWith(prefix)) return null;
+
+  const rawId = path.slice(prefix.length);
+
+  if (!rawId || rawId.includes("/")) {
+    return json({ error: "Conversation invalide." }, 400);
+  }
+
+  let conversationId: string;
+
+  try {
+    conversationId = decodeURIComponent(rawId);
+  } catch {
+    return json({ error: "Identifiant invalide." }, 400);
+  }
+
+  if (!conversationId || conversationId.length > 128) {
+    return json({ error: "Identifiant invalide." }, 400);
+  }
+
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return json({ error: "WebSocket requis." }, 426);
+  }
+
+  const allowed = await isConversationMember(
+    env,
+    conversationId,
+    currentUser.id
+  );
+
+  if (!allowed) {
+    return json({ error: "Accès à cette conversation refusé." }, 403);
+  }
+
+  const roomId = env.REALTIME.idFromName(conversationId);
+  const room = env.REALTIME.get(roomId);
+
+  const internalUrl = new URL("https://nexora-internal/connect");
+
+  const headers = new Headers(request.headers);
+  headers.set("X-Nexora-User", currentUser.id);
+  headers.set("X-Nexora-Conversation", conversationId);
+
+  const internalRequest = new Request(internalUrl.toString(), {
+    method: "GET",
+    headers
+  });
+
+  return room.fetch(internalRequest);
+}
