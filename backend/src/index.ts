@@ -528,17 +528,22 @@ async function dispatchPrivateRoute(
   }
 
   if (path.startsWith("/api/messages")) {
-    const result = await handleMessages(
-      request, env, user, path
-    );
-    if (result) return result;
-  }
+    const reactionMatch =
+      /^\/api\/messages\/[^/]+\/reactions$/.test(path);
 
-  if (path.startsWith("/api/reactions")) {
-    const result = await handleReactions(
+    if (reactionMatch) {
+      const reactionResult = await handleReactions(
+        request, env, user, path
+      );
+
+      if (reactionResult) return reactionResult;
+    }
+
+    const messageResult = await handleMessages(
       request, env, user, path
     );
-    if (result) return result;
+
+    if (messageResult) return messageResult;
   }
 
   if (path.startsWith("/api/media")) {
