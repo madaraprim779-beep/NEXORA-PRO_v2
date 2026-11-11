@@ -305,6 +305,10 @@ export default function App() {
       return;
     }
 
+    // Valeurs capturées après validation pour TypeScript.
+    const activeToken: string = token;
+    const activeConversationId: string = conversationId;
+
     let cancelled = false;
 
     async function refreshMessages(initial = false) {
@@ -314,8 +318,8 @@ export default function App() {
         }
 
         const result = await loadConversationMessages(
-          conversationId,
-          token
+          activeConversationId,
+          activeToken
         );
 
         if (!cancelled) {
@@ -330,7 +334,7 @@ export default function App() {
                 try {
                   const data = await loadMessageReactions(
                     message.id,
-                    token
+                    activeToken
                   );
 
                   return [
