@@ -13,7 +13,7 @@ import { handleNotifications } from "./notifications";
 
 export { RealtimeRoom };
 
-interface Env {
+export interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
   REALTIME: DurableObjectNamespace;
@@ -35,7 +35,10 @@ const corsHeaders = {
   "Access-Control-Max-Age": "86400",
 };
 
-function response(data: unknown, status = 200): Response {
+function response(
+  data: unknown,
+  status = 200
+): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -48,7 +51,9 @@ function response(data: unknown, status = 200): Response {
 
 function withCors(result: Response): Response {
   // Ne pas reconstruire une réponse WebSocket.
-  if (result.status === 101) return result;
+  if (result.status === 101) {
+    return result;
+  }
 
   const headers = new Headers(result.headers);
 
@@ -64,7 +69,9 @@ function withCors(result: Response): Response {
 }
 
 function randomString(bytes = 32): string {
-  const array = crypto.getRandomValues(new Uint8Array(bytes));
+  const array = crypto.getRandomValues(
+    new Uint8Array(bytes)
+  );
 
   return btoa(String.fromCharCode(...array))
     .replace(/\+/g, "-")
@@ -125,7 +132,9 @@ async function hashPassword(
     .join("");
 }
 
-async function createNexoraId(db: D1Database): Promise<string> {
+async function createNexoraId(
+  db: D1Database
+): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const id =
       "NXR-" +
@@ -135,18 +144,25 @@ async function createNexoraId(db: D1Database): Promise<string> {
         .slice(0, 8);
 
     const existing = await db
-      .prepare("SELECT id FROM profiles WHERE nexora_id = ?")
+      .prepare(
+        "SELECT id FROM profiles WHERE nexora_id = ?"
+      )
       .bind(id)
       .first();
 
-    if (!existing) return id;
+    if (!existing) {
+      return id;
+    }
   }
 
-  throw new Error("Impossible de générer un NEXORA ID.");
+  throw new Error(
+    "Impossible de générer un NEXORA ID."
+  );
 }
 
 function getToken(request: Request): string | null {
-  const authorization = request.headers.get("Authorization");
+  const authorization =
+    request.headers.get("Authorization");
 
   if (!authorization?.startsWith("Bearer ")) {
     return null;
@@ -155,7 +171,10 @@ function getToken(request: Request): string | null {
   return authorization.slice(7).trim() || null;
 }
 
-async function createSession(db: D1Database, userId: string) {
+async function createSession(
+  db: D1Database,
+  userId: string
+) {
   const token = randomString(48);
   const tokenHash = await sha256(token);
   const sessionId = crypto.randomUUID();
@@ -168,9 +187,17 @@ async function createSession(db: D1Database, userId: string) {
     INSERT INTO sessions
       (id, user_id, token_hash, expires_at)
     VALUES (?, ?, ?, ?)
-  `).bind(sessionId, userId, tokenHash, expiresAt).run();
+  `).bind(
+    sessionId,
+    userId,
+    tokenHash,
+    expiresAt
+  ).run();
 
-  return { token, expiresAt };
+  return {
+    token,
+    expiresAt,
+  };
 }
 
 async function authenticate(
@@ -178,7 +205,10 @@ async function authenticate(
   db: D1Database
 ): Promise<AuthUser | null> {
   const token = getToken(request);
-  if (!token) return null;
+
+  if (!token) {
+    return null;
+  }
 
   const tokenHash = await sha256(token);
 
@@ -189,7 +219,8 @@ async function authenticate(
       profiles.username,
       profiles.display_name
     FROM sessions
-    JOIN profiles ON profiles.id = sessions.user_id
+    JOIN profiles
+      ON profiles.id = sessions.user_id
     WHERE sessions.token_hash = ?
       AND sessions.expires_at > ?
   `).bind(
@@ -198,7 +229,9 @@ async function authenticate(
   ).first<AuthUser>();
 }
 
-async function readJson(request: Request): Promise<any> {
+async function readJson(
+  request: Request
+): Promise<any> {
   try {
     return await request.json();
   } catch {
@@ -206,7 +239,9 @@ async function readJson(request: Request): Promise<any> {
   }
 }
 
-async function handleHealth(env: Env): Promise<Response> {
+async function handleHealth(
+  env: Env
+): Promise<Response> {
   const expectedTables = [
     "profiles",
     "credentials",
@@ -230,19 +265,25 @@ async function handleHealth(env: Env): Promise<Response> {
     SELECT name
     FROM sqlite_master
     WHERE type = 'table'
-      AND name IN (${expectedTables.map(() => "?").join(",")})
-  `).bind(...expectedTables).all<{ name: string }>();
+      AND name IN (
+        ${expectedTables.map(() => "?").join(",")}
+      )
+  `).bind(...expectedTables)
+    .all<{ name: string }>();
 
-  const foundTables = (result.results ?? []).map(
-    (table) => table.name
-  );
+  const foundTables = (
+    result.results ?? []
+  ).map((table) => table.name);
 
   const missingTables = expectedTables.filter(
     (table) => !foundTables.includes(table)
   );
 
+  const databaseReady =
+    missingTables.length === 0;
+
   return response({
-    success: missingTables.length === 0,
+    success: databaseReady,
     application: "NEXORA PRO V2",
     server: "online",
     database: "connected",
@@ -250,9 +291,9 @@ async function handleHealth(env: Env): Promise<Response> {
     tables_expected: expectedTables.length,
     missing_tables: missingTables,
     services: {
-      database: "configured",
-      media_storage: "binding_required",
-      realtime: "binding_required",
+      database: "connected",
+      media_storage: "requires_R2_binding",
+      realtime: "requires_Durable_Object_binding",
       calls: "signaling_not_configured",
     },
     timestamp: new Date().toISOString(),
@@ -265,8 +306,10 @@ async function handleRegister(
 ): Promise<Response> {
   const body = await readJson(request);
 
-  if (!body) {
-    return response({ error: "Données invalides." }, 400);
+  if (!body || typeof body !== "object") {
+    return response({
+      error: "Données invalides.",
+    }, 400);
   }
 
   const username =
@@ -283,13 +326,17 @@ async function handleRegister(
 
   if (!/^[A-Za-z0-9_]{3,24}$/.test(username)) {
     return response({
-      error: "Pseudo invalide : 3 à 24 caractères."
+      error:
+        "Pseudo invalide : 3 à 24 caractères, lettres, chiffres et underscore.",
     }, 400);
   }
 
-  if (!displayName || displayName.length > 40) {
+  if (
+    !displayName ||
+    displayName.length > 40
+  ) {
     return response({
-      error: "Nom d'affichage invalide."
+      error: "Nom d'affichage invalide.",
     }, 400);
   }
 
@@ -299,14 +346,20 @@ async function handleRegister(
     password.length > 128
   ) {
     return response({
-      error: "Mot de passe invalide."
+      error:
+        "Le mot de passe doit contenir entre 8 et 128 caractères.",
     }, 400);
   }
 
   const userId = crypto.randomUUID();
   const nexoraId = await createNexoraId(env.DB);
+
   const salt = randomString(16);
-  const passwordHash = await hashPassword(password, salt);
+
+  const passwordHash = await hashPassword(
+    password,
+    salt
+  );
 
   const sessionToken = randomString(48);
   const tokenHash = await sha256(sessionToken);
@@ -321,22 +374,37 @@ async function handleRegister(
       INSERT INTO profiles
         (id, nexora_id, username, display_name)
       VALUES (?, ?, ?, ?)
-    `).bind(userId, nexoraId, username, displayName),
+    `).bind(
+      userId,
+      nexoraId,
+      username,
+      displayName
+    ),
 
     env.DB.prepare(`
       INSERT INTO credentials
         (user_id, password_hash, password_salt)
       VALUES (?, ?, ?)
-    `).bind(userId, passwordHash, salt),
+    `).bind(
+      userId,
+      passwordHash,
+      salt
+    ),
 
     env.DB.prepare(`
       INSERT INTO sessions
         (id, user_id, token_hash, expires_at)
       VALUES (?, ?, ?, ?)
-    `).bind(sessionId, userId, tokenHash, expiresAt),
+    `).bind(
+      sessionId,
+      userId,
+      tokenHash,
+      expiresAt
+    ),
 
     env.DB.prepare(`
-      INSERT OR IGNORE INTO privacy_settings (user_id)
+      INSERT OR IGNORE INTO privacy_settings
+        (user_id)
       VALUES (?)
     `).bind(userId),
   ]);
@@ -360,8 +428,10 @@ async function handleLogin(
 ): Promise<Response> {
   const body = await readJson(request);
 
-  if (!body) {
-    return response({ error: "Données invalides." }, 400);
+  if (!body || typeof body !== "object") {
+    return response({
+      error: "Données invalides.",
+    }, 400);
   }
 
   const nexoraId =
@@ -374,10 +444,12 @@ async function handleLogin(
   if (
     !nexoraId ||
     typeof password !== "string" ||
+    password.length < 1 ||
     password.length > 128
   ) {
     return response({
-      error: "Identifiants manquants ou invalides."
+      error:
+        "Identifiants manquants ou invalides.",
     }, 400);
   }
 
@@ -390,7 +462,8 @@ async function handleLogin(
       credentials.password_hash,
       credentials.password_salt
     FROM profiles
-    JOIN credentials ON credentials.user_id = profiles.id
+    JOIN credentials
+      ON credentials.user_id = profiles.id
     WHERE profiles.nexora_id = ?
   `).bind(nexoraId).first<{
     id: string;
@@ -403,7 +476,7 @@ async function handleLogin(
 
   if (!user) {
     return response({
-      error: "Identifiants incorrects."
+      error: "Identifiants incorrects.",
     }, 401);
   }
 
@@ -414,11 +487,14 @@ async function handleLogin(
 
   if (suppliedHash !== user.password_hash) {
     return response({
-      error: "Identifiants incorrects."
+      error: "Identifiants incorrects.",
     }, 401);
   }
 
-  const session = await createSession(env.DB, user.id);
+  const session = await createSession(
+    env.DB,
+    user.id
+  );
 
   return response({
     success: true,
@@ -438,71 +514,104 @@ async function dispatchPrivateRoute(
   user: AuthUser,
   path: string
 ): Promise<Response | null> {
-  // Contacts et conversations privées
+
+  // Utilisateurs, contacts et conversations
   if (
     path === "/api/users/search" ||
     path.startsWith("/api/contacts") ||
     path.startsWith("/api/conversations")
   ) {
     const result = await handleMessaging(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Groupes
   if (path.startsWith("/api/groups")) {
     const result = await handleGroups(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Messages
   if (path.startsWith("/api/messages")) {
     const result = await handleMessages(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
-  // Réactions aux messages
+  // Réactions
   if (path.startsWith("/api/reactions")) {
     const result = await handleReactions(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Photos, vidéos et fichiers
   if (path.startsWith("/api/media")) {
     const result = await handleMedia(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Messages vocaux
   if (path.startsWith("/api/voice")) {
     const result = await handleVoice(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Statuts
   if (path.startsWith("/api/statuses")) {
     const result = await handleStatuses(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Appels
   if (path.startsWith("/api/calls")) {
     const result = await handleCalls(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
@@ -512,24 +621,36 @@ async function dispatchPrivateRoute(
     path.startsWith("/api/reports")
   ) {
     const result = await handlePrivacy(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
   // Notifications
   if (path.startsWith("/api/notifications")) {
     const result = await handleNotifications(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
-  // Connexion temps réel
+  // Temps réel
   if (path.startsWith("/api/realtime/")) {
     const result = await handleRealtime(
-      request, env, user, path
+      request,
+      env,
+      user,
+      path
     );
+
     if (result) return result;
   }
 
@@ -537,7 +658,12 @@ async function dispatchPrivateRoute(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env
+  ): Promise<Response> {
+
+    // Prévol CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -549,7 +675,8 @@ export default {
     const path = url.pathname;
 
     try {
-      // HEALTH
+
+      // ÉTAT DU SERVEUR
       if (
         request.method === "GET" &&
         path === "/api/health"
@@ -557,32 +684,42 @@ export default {
         return await handleHealth(env);
       }
 
-      // REGISTER
+      // INSCRIPTION
       if (
         request.method === "POST" &&
         path === "/api/auth/register"
       ) {
-        return await handleRegister(request, env);
+        return await handleRegister(
+          request,
+          env
+        );
       }
 
-      // LOGIN
+      // CONNEXION
       if (
         request.method === "POST" &&
         path === "/api/auth/login"
       ) {
-        return await handleLogin(request, env);
+        return await handleLogin(
+          request,
+          env
+        );
       }
 
-      // CURRENT USER
+      // UTILISATEUR CONNECTÉ
       if (
         request.method === "GET" &&
         path === "/api/auth/me"
       ) {
-        const user = await authenticate(request, env.DB);
+        const user = await authenticate(
+          request,
+          env.DB
+        );
 
         if (!user) {
           return response({
-            error: "Session invalide ou expirée."
+            error:
+              "Session invalide ou expirée.",
           }, 401);
         }
 
@@ -592,7 +729,7 @@ export default {
         });
       }
 
-      // LOGOUT
+      // DÉCONNEXION
       if (
         request.method === "POST" &&
         path === "/api/auth/logout"
@@ -603,7 +740,8 @@ export default {
           const tokenHash = await sha256(token);
 
           await env.DB.prepare(`
-            DELETE FROM sessions WHERE token_hash = ?
+            DELETE FROM sessions
+            WHERE token_hash = ?
           `).bind(tokenHash).run();
         }
 
@@ -613,7 +751,7 @@ export default {
         });
       }
 
-      // PRIVATE ROUTES
+      // ROUTES PRIVÉES
       if (path.startsWith("/api/")) {
         const currentUser = await authenticate(
           request,
@@ -622,7 +760,7 @@ export default {
 
         if (!currentUser) {
           return response({
-            error: "Authentification requise."
+            error: "Authentification requise.",
           }, 401);
         }
 
@@ -633,7 +771,9 @@ export default {
           path
         );
 
-        if (result) return withCors(result);
+        if (result) {
+          return withCors(result);
+        }
       }
 
       return response({
@@ -642,7 +782,10 @@ export default {
       }, 404);
 
     } catch (error) {
-      console.error("NEXORA API error:", error);
+      console.error(
+        "NEXORA API error:",
+        error
+      );
 
       return response({
         success: false,
