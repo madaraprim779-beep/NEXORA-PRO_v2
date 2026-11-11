@@ -1,4 +1,3 @@
-
 import { handleMessaging } from "./messaging";
 import { handleGroups } from "./groups";
 import { handleMedia } from "./media";
@@ -50,9 +49,7 @@ function response(
 }
 
 function withCors(result: Response): Response {
-  if (result.status === 101) {
-    return result;
-  }
+  if (result.status === 101) return result;
 
   const headers = new Headers(result.headers);
 
@@ -322,15 +319,11 @@ async function handleRegister(
 
   if (!/^[A-Za-z0-9_]{3,24}$/.test(username)) {
     return response({
-      error:
-        "Pseudo invalide : 3 à 24 caractères.",
+      error: "Pseudo invalide : 3 à 24 caractères.",
     }, 400);
   }
 
-  if (
-    !displayName ||
-    displayName.length > 40
-  ) {
+  if (!displayName || displayName.length > 40) {
     return response({
       error: "Nom d'affichage invalide.",
     }, 400);
@@ -342,8 +335,7 @@ async function handleRegister(
     password.length > 128
   ) {
     return response({
-      error:
-        "Mot de passe invalide : 8 à 128 caractères.",
+      error: "Mot de passe invalide : 8 à 128 caractères.",
     }, 400);
   }
 
@@ -517,6 +509,7 @@ async function dispatchPrivateRoute(
     const result = await handleMessaging(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -524,6 +517,7 @@ async function dispatchPrivateRoute(
     const result = await handleGroups(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -539,8 +533,11 @@ async function dispatchPrivateRoute(
       if (reactionResult) return reactionResult;
     }
 
+    // CORRECTION : handleMessages reçoit 3 paramètres.
     const messageResult = await handleMessages(
-      request, env, user, path
+      request,
+      env,
+      user
     );
 
     if (messageResult) return messageResult;
@@ -550,8 +547,7 @@ async function dispatchPrivateRoute(
     if (!env.MEDIA) {
       return response({
         success: false,
-        error:
-          "Stockage des médias temporairement indisponible.",
+        error: "Stockage des médias temporairement indisponible.",
       }, 503);
     }
 
@@ -561,6 +557,7 @@ async function dispatchPrivateRoute(
       user,
       path
     );
+
     if (result) return result;
   }
 
@@ -568,8 +565,7 @@ async function dispatchPrivateRoute(
     if (!env.MEDIA) {
       return response({
         success: false,
-        error:
-          "Stockage vocal temporairement indisponible.",
+        error: "Stockage vocal temporairement indisponible.",
       }, 503);
     }
 
@@ -579,6 +575,7 @@ async function dispatchPrivateRoute(
       user,
       path
     );
+
     if (result) return result;
   }
 
@@ -586,6 +583,7 @@ async function dispatchPrivateRoute(
     const result = await handleStatuses(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -593,6 +591,7 @@ async function dispatchPrivateRoute(
     const result = await handleCalls(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -603,6 +602,7 @@ async function dispatchPrivateRoute(
     const result = await handlePrivacy(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -610,6 +610,7 @@ async function dispatchPrivateRoute(
     const result = await handleNotifications(
       request, env, user, path
     );
+
     if (result) return result;
   }
 
@@ -617,19 +618,19 @@ async function dispatchPrivateRoute(
     if (!env.REALTIME) {
       return response({
         success: false,
-        error:
-          "Service temps réel temporairement indisponible.",
+        error: "Service temps réel temporairement indisponible.",
       }, 503);
     }
 
     const result = await handleRealtime(
       request,
       env as Env & {
-        REALTIME: DurableObjectNamespace
+        REALTIME: DurableObjectNamespace;
       },
       user,
       path
     );
+
     if (result) return result;
   }
 
@@ -685,8 +686,7 @@ export default {
 
         if (!user) {
           return response({
-            error:
-              "Session invalide ou expirée.",
+            error: "Session invalide ou expirée.",
           }, 401);
         }
 
@@ -747,10 +747,7 @@ export default {
       }, 404);
 
     } catch (error) {
-      console.error(
-        "NEXORA API error:",
-        error
-      );
+      console.error("NEXORA API error:", error);
 
       return response({
         success: false,
