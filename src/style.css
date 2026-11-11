@@ -1,0 +1,39 @@
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #08080c;
+  color: white;
+  font-family: Arial, sans-serif;
+}
+
+main {
+  min-height: 100vh;
+  padding: 30px 20px;
+}
+
+h1 {
+  letter-spacing: 5px;
+  color: #a78bfa;
+}
+
+section {
+  max-width: 500px;
+  margin: 100px auto;
+  padding: 30px;
+  background: #15151f;
+  border: 1px solid #29293b;
+  border-radius: 22px;
+}
+
+button {
+  padding: 14px 24px;
+  background: #8b5cf6;
+  color: white;
+  border: 0;
+  border-radius: 12px;
+  font-weight: bold;
+}
