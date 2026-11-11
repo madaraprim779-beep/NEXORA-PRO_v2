@@ -15,8 +15,8 @@ export { RealtimeRoom };
 
 export interface Env {
   DB: D1Database;
-  MEDIA: R2Bucket;
-  REALTIME: DurableObjectNamespace;
+  MEDIA?: R2Bucket;
+  REALTIME?: DurableObjectNamespace;
 }
 
 interface AuthUser {
@@ -50,7 +50,6 @@ function response(
 }
 
 function withCors(result: Response): Response {
-  // Ne pas reconstruire une réponse WebSocket.
   if (result.status === 101) {
     return result;
   }
@@ -150,9 +149,7 @@ async function createNexoraId(
       .bind(id)
       .first();
 
-    if (!existing) {
-      return id;
-    }
+    if (!existing) return id;
   }
 
   throw new Error(
@@ -206,9 +203,7 @@ async function authenticate(
 ): Promise<AuthUser | null> {
   const token = getToken(request);
 
-  if (!token) {
-    return null;
-  }
+  if (!token) return null;
 
   const tokenHash = await sha256(token);
 
@@ -279,11 +274,8 @@ async function handleHealth(
     (table) => !foundTables.includes(table)
   );
 
-  const databaseReady =
-    missingTables.length === 0;
-
   return response({
-    success: databaseReady,
+    success: missingTables.length === 0,
     application: "NEXORA PRO V2",
     server: "online",
     database: "connected",
@@ -292,8 +284,12 @@ async function handleHealth(
     missing_tables: missingTables,
     services: {
       database: "connected",
-      media_storage: "requires_R2_binding",
-      realtime: "requires_Durable_Object_binding",
+      media_storage: env.MEDIA
+        ? "configured"
+        : "disabled",
+      realtime: env.REALTIME
+        ? "configured"
+        : "disabled",
       calls: "signaling_not_configured",
     },
     timestamp: new Date().toISOString(),
@@ -327,7 +323,7 @@ async function handleRegister(
   if (!/^[A-Za-z0-9_]{3,24}$/.test(username)) {
     return response({
       error:
-        "Pseudo invalide : 3 à 24 caractères, lettres, chiffres et underscore.",
+        "Pseudo invalide : 3 à 24 caractères.",
     }, 400);
   }
 
@@ -347,13 +343,12 @@ async function handleRegister(
   ) {
     return response({
       error:
-        "Le mot de passe doit contenir entre 8 et 128 caractères.",
+        "Mot de passe invalide : 8 à 128 caractères.",
     }, 400);
   }
 
   const userId = crypto.randomUUID();
   const nexoraId = await createNexoraId(env.DB);
-
   const salt = randomString(16);
 
   const passwordHash = await hashPassword(
@@ -448,8 +443,7 @@ async function handleLogin(
     password.length > 128
   ) {
     return response({
-      error:
-        "Identifiants manquants ou invalides.",
+      error: "Identifiants invalides.",
     }, 400);
   }
 
@@ -515,142 +509,122 @@ async function dispatchPrivateRoute(
   path: string
 ): Promise<Response | null> {
 
-  // Utilisateurs, contacts et conversations
   if (
     path === "/api/users/search" ||
     path.startsWith("/api/contacts") ||
     path.startsWith("/api/conversations")
   ) {
     const result = await handleMessaging(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Groupes
   if (path.startsWith("/api/groups")) {
     const result = await handleGroups(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Messages
   if (path.startsWith("/api/messages")) {
     const result = await handleMessages(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Réactions
   if (path.startsWith("/api/reactions")) {
     const result = await handleReactions(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Photos, vidéos et fichiers
   if (path.startsWith("/api/media")) {
+    if (!env.MEDIA) {
+      return response({
+        success: false,
+        error:
+          "Stockage des médias temporairement indisponible.",
+      }, 503);
+    }
+
     const result = await handleMedia(
       request,
-      env,
+      env as Env & { MEDIA: R2Bucket },
       user,
       path
     );
-
     if (result) return result;
   }
 
-  // Messages vocaux
   if (path.startsWith("/api/voice")) {
+    if (!env.MEDIA) {
+      return response({
+        success: false,
+        error:
+          "Stockage vocal temporairement indisponible.",
+      }, 503);
+    }
+
     const result = await handleVoice(
       request,
-      env,
+      env as Env & { MEDIA: R2Bucket },
       user,
       path
     );
-
     if (result) return result;
   }
 
-  // Statuts
   if (path.startsWith("/api/statuses")) {
     const result = await handleStatuses(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Appels
   if (path.startsWith("/api/calls")) {
     const result = await handleCalls(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Confidentialité et signalements
   if (
     path.startsWith("/api/privacy") ||
     path.startsWith("/api/reports")
   ) {
     const result = await handlePrivacy(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Notifications
   if (path.startsWith("/api/notifications")) {
     const result = await handleNotifications(
-      request,
-      env,
-      user,
-      path
+      request, env, user, path
     );
-
     if (result) return result;
   }
 
-  // Temps réel
   if (path.startsWith("/api/realtime/")) {
+    if (!env.REALTIME) {
+      return response({
+        success: false,
+        error:
+          "Service temps réel temporairement indisponible.",
+      }, 503);
+    }
+
     const result = await handleRealtime(
       request,
-      env,
+      env as Env & {
+        REALTIME: DurableObjectNamespace
+      },
       user,
       path
     );
-
     if (result) return result;
   }
 
@@ -663,7 +637,6 @@ export default {
     env: Env
   ): Promise<Response> {
 
-    // Prévol CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -675,8 +648,6 @@ export default {
     const path = url.pathname;
 
     try {
-
-      // ÉTAT DU SERVEUR
       if (
         request.method === "GET" &&
         path === "/api/health"
@@ -684,29 +655,20 @@ export default {
         return await handleHealth(env);
       }
 
-      // INSCRIPTION
       if (
         request.method === "POST" &&
         path === "/api/auth/register"
       ) {
-        return await handleRegister(
-          request,
-          env
-        );
+        return await handleRegister(request, env);
       }
 
-      // CONNEXION
       if (
         request.method === "POST" &&
         path === "/api/auth/login"
       ) {
-        return await handleLogin(
-          request,
-          env
-        );
+        return await handleLogin(request, env);
       }
 
-      // UTILISATEUR CONNECTÉ
       if (
         request.method === "GET" &&
         path === "/api/auth/me"
@@ -729,7 +691,6 @@ export default {
         });
       }
 
-      // DÉCONNEXION
       if (
         request.method === "POST" &&
         path === "/api/auth/logout"
@@ -751,7 +712,6 @@ export default {
         });
       }
 
-      // ROUTES PRIVÉES
       if (path.startsWith("/api/")) {
         const currentUser = await authenticate(
           request,
