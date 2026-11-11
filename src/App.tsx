@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   MessageCircle, Users, CircleDot, Phone, Settings, Search,
-  Plus, LogOut, RefreshCw, ShieldCheck, X
+  LogOut, RefreshCw, ShieldCheck, X, ArrowLeft, Send
 } from "lucide-react";
 
 type User = {
@@ -29,6 +29,18 @@ type Conversation = {
   last_message_at?: string | null;
 };
 
+type Message = {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  content: string;
+  message_type: string;
+  reply_to: string | null;
+  edited_at: string | null;
+  deleted_at: string | null;
+  created_at: string;
+};
+
 type Section =
   | "Discussions"
   | "Contacts"
@@ -49,7 +61,7 @@ async function api<T>(
 ): Promise<T> {
   if (!API_URL) {
     throw new Error(
-      "Adresse API non configurée. La variable VITE_API_URL doit être ajoutée."
+      "Adresse API non configurée. Ajoute VITE_API_URL dans les variables Vercel."
     );
   }
 
@@ -57,9 +69,7 @@ async function api<T>(
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(token
-        ? { Authorization: `Bearer ${token}` }
-        : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {})
     }
   });
@@ -67,9 +77,7 @@ async function api<T>(
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(
-      data.error || "Une erreur est survenue."
-    );
+    throw new Error(data.error || "Une erreur est survenue.");
   }
 
   return data as T;
@@ -79,6 +87,19 @@ function initials(value: string) {
   return value.trim().slice(0, 1).toUpperCase() || "N";
 }
 
+function formatMessageTime(value?: string | null) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleTimeString("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 export default function App() {
   const [token, setToken] = useState(
     () => localStorage.getItem(TOKEN_KEY) || ""
@@ -86,21 +107,28 @@ export default function App() {
 
   const [user, setUser] = useState<User | null>(null);
 
-  const [authMode, setAuthMode] = useState<
-    "login" | "register"
-  >("login");
+  const [authMode, setAuthMode] = useState<"login" | "register">(
+    "login"
+  );
 
   const [nexoraId, setNexoraId] = useState("");
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
 
-  const [section, setSection] =
-    useState<Section>("Discussions");
+  const [section, setSection] = useState<Section>("Discussions");
 
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [conversations, setConversations] =
-    useState<Conversation[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+
+  const [selectedConversation, setSelectedConversation] =
+    useState<Conversation | null>(null);
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [draft, setDraft] = useState("");
+
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [sending, setSending] = useState(false);
 
   const [search, setSearch] = useState("");
   const [newContactId, setNewContactId] = useState("");
@@ -117,30 +145,70 @@ export default function App() {
     setNotice("");
   };
 
-  const loadWorkspace = useCallback(
-    async (session: string) => {
-      const [me, contactData, conversationData] =
-        await Promise.all([
-          api<{ user: User }>("/api/auth/me", session),
-          api<{ contacts: Contact[] }>(
-            "/api/contacts",
-            session
-          ),
-          api<{ conversations: Conversation[] }>(
-            "/api/conversations",
-            session
-          )
-        ]);
+  const loadWorkspace = useCallback(async (session: string) => {
+    const [me, contactData, conversationData] = await Promise.all([
+      api<{ user: User }>("/api/auth/me", session),
+      api<{ contacts: Contact[] }>("/api/contacts", session),
+      api<{ conversations: Conversation[] }>("/api/conversations", session)
+    ]);
 
-      setUser(me.user);
-      setContacts(contactData.contacts || []);
-      setConversations(
-        conversationData.conversations || []
+    setUser(me.user);
+    setContacts(contactData.contacts || []);
+    setConversations(conversationData.conversations || []);
+  }, []);
+
+  const loadConversationMessages = useCallback(
+    async (conversationId: string, session: string) => {
+      return api<{ success: boolean; messages: Message[] }>(
+        "/api/messages?conversation_id=" +
+          encodeURIComponent(conversationId),
+        session
       );
     },
     []
   );
 
+  // Charger les vrais messages quand une conversation est ouverte.
+  useEffect(() => {
+    const conversationId = selectedConversation?.conversation_id;
+
+    if (!token || !conversationId) {
+      setMessages([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    setMessages([]);
+    setMessagesLoading(true);
+
+    loadConversationMessages(conversationId, token)
+      .then((result) => {
+        if (!cancelled) {
+          setMessages(result.messages || []);
+        }
+      })
+      .catch((e: Error) => {
+        if (!cancelled) {
+          setError(e.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMessagesLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    token,
+    selectedConversation?.conversation_id,
+    loadConversationMessages
+  ]);
+
+  // Récupérer le compte et les données réelles à la connexion.
   useEffect(() => {
     if (!token) return;
 
@@ -185,11 +253,7 @@ export default function App() {
     const q = search.trim().toLowerCase();
 
     return contacts.filter((c) =>
-      [
-        c.display_name,
-        c.username,
-        c.nexora_id
-      ].some((value) =>
+      [c.display_name, c.username, c.nexora_id].some((value) =>
         value.toLowerCase().includes(q)
       )
     );
@@ -252,11 +316,76 @@ export default function App() {
 
     try {
       await loadWorkspace(token);
+
+      if (selectedConversation) {
+        const result = await loadConversationMessages(
+          selectedConversation.conversation_id,
+          token
+        );
+
+        setMessages(result.messages || []);
+      }
+
       setNotice("Données actualisées.");
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  function openConversation(conversation: Conversation) {
+    clearMessages();
+    setSection("Discussions");
+    setSelectedConversation(conversation);
+    setDraft("");
+  }
+
+  async function sendMessage(event: FormEvent) {
+    event.preventDefault();
+
+    const content = draft.trim();
+    const conversation = selectedConversation;
+
+    if (!content || !conversation || sending) return;
+
+    clearMessages();
+    setSending(true);
+
+    try {
+      const result = await api<{
+        success: boolean;
+        message: Message;
+      }>("/api/messages", token, {
+        method: "POST",
+        body: JSON.stringify({
+          conversation_id: conversation.conversation_id,
+          content
+        })
+      });
+
+      if (result.message) {
+        setMessages((current) => [
+          ...current,
+          result.message
+        ]);
+      } else {
+        const updated = await loadConversationMessages(
+          conversation.conversation_id,
+          token
+        );
+
+        setMessages(updated.messages || []);
+      }
+
+      setDraft("");
+
+      // Mettre à jour le dernier message dans la liste.
+      await loadWorkspace(token);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSending(false);
     }
   }
 
@@ -273,16 +402,12 @@ export default function App() {
         user: User | null;
       }>(
         "/api/users/search?nexora_id=" +
-          encodeURIComponent(
-            newContactId.trim().toUpperCase()
-          ),
+          encodeURIComponent(newContactId.trim().toUpperCase()),
         token
       );
 
       if (!result.found || !result.user) {
-        setNotice(
-          "Aucun compte trouvé avec ce NEXORA ID."
-        );
+        setNotice("Aucun compte trouvé avec ce NEXORA ID.");
       } else {
         setFoundUser(result.user);
       }
@@ -307,7 +432,9 @@ export default function App() {
         })
       });
 
-      await api("/api/conversations/private", token, {
+      const conversationResult = await api<{
+        conversation?: Conversation;
+      }>("/api/conversations/private", token, {
         method: "POST",
         body: JSON.stringify({
           nexora_id: foundUser.nexora_id
@@ -320,9 +447,11 @@ export default function App() {
       setNewContactId("");
       setSection("Discussions");
 
-      setNotice(
-        "Contact ajouté. Conversation créée."
-      );
+      if (conversationResult.conversation) {
+        openConversation(conversationResult.conversation);
+      }
+
+      setNotice("Contact ajouté.");
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -344,6 +473,8 @@ export default function App() {
     setUser(null);
     setContacts([]);
     setConversations([]);
+    setMessages([]);
+    setSelectedConversation(null);
     setSection("Discussions");
   }
 
@@ -375,9 +506,8 @@ export default function App() {
 
           <div className="auth-switch">
             <button
-              className={
-                authMode === "login" ? "active" : ""
-              }
+              type="button"
+              className={authMode === "login" ? "active" : ""}
               onClick={() => {
                 setAuthMode("login");
                 clearMessages();
@@ -387,9 +517,8 @@ export default function App() {
             </button>
 
             <button
-              className={
-                authMode === "register" ? "active" : ""
-              }
+              type="button"
+              className={authMode === "register" ? "active" : ""}
               onClick={() => {
                 setAuthMode("register");
                 clearMessages();
@@ -399,10 +528,7 @@ export default function App() {
             </button>
           </div>
 
-          <form
-            onSubmit={submitAuth}
-            className="auth-form"
-          >
+          <form onSubmit={submitAuth} className="auth-form">
             {authMode === "register" ? (
               <>
                 <label>
@@ -413,9 +539,7 @@ export default function App() {
                     maxLength={24}
                     pattern="[A-Za-z0-9_]+"
                     value={username}
-                    onChange={(e) =>
-                      setUsername(e.target.value)
-                    }
+                    onChange={(e) => setUsername(e.target.value)}
                     placeholder="Votre_pseudo"
                   />
                 </label>
@@ -426,9 +550,7 @@ export default function App() {
                     required
                     maxLength={40}
                     value={displayName}
-                    onChange={(e) =>
-                      setDisplayName(e.target.value)
-                    }
+                    onChange={(e) => setDisplayName(e.target.value)}
                     placeholder="Votre nom"
                   />
                 </label>
@@ -440,9 +562,7 @@ export default function App() {
                   required
                   value={nexoraId}
                   onChange={(e) =>
-                    setNexoraId(
-                      e.target.value.toUpperCase()
-                    )
+                    setNexoraId(e.target.value.toUpperCase())
                   }
                   placeholder="NXR-XXXXXXXX"
                 />
@@ -453,14 +573,10 @@ export default function App() {
               Mot de passe
               <input
                 required
-                minLength={
-                  authMode === "register" ? 8 : 1
-                }
+                minLength={authMode === "register" ? 8 : 1}
                 type="password"
                 value={password}
-                onChange={(e) =>
-                  setPassword(e.target.value)
-                }
+                onChange={(e) => setPassword(e.target.value)}
                 placeholder="Mot de passe"
               />
             </label>
@@ -470,15 +586,10 @@ export default function App() {
             )}
 
             {notice && (
-              <p className="feedback success">
-                {notice}
-              </p>
+              <p className="feedback success">{notice}</p>
             )}
 
-            <button
-              className="primary-btn"
-              disabled={busy}
-            >
+            <button className="primary-btn" disabled={busy}>
               {busy
                 ? "Veuillez patienter…"
                 : authMode === "login"
@@ -507,21 +618,39 @@ export default function App() {
     { label: "Paramètres" as Section, icon: Settings }
   ];
 
+  const conversationTitle = selectedConversation
+    ? selectedConversation.participant_display_name ||
+      selectedConversation.title ||
+      selectedConversation.participant_username ||
+      selectedConversation.participant_nexora_id ||
+      "Conversation"
+    : "";
+
   return (
-    <main className="app-shell">
+    <main
+      className={
+        selectedConversation
+          ? "app-shell chat-open"
+          : "app-shell"
+      }
+    >
       <aside className="rail">
         <div className="brand-mark">N</div>
 
         <nav className="rail-nav">
           {navItems.map(({ label, icon: Icon }) => (
             <button
+              type="button"
               key={label}
               className={
-                section === label
-                  ? "rail-item active"
-                  : "rail-item"
+                section === label ? "rail-item active" : "rail-item"
               }
-              onClick={() => setSection(label)}
+              onClick={() => {
+                setSection(label);
+                if (label !== "Discussions") {
+                  setSelectedConversation(null);
+                }
+              }}
               title={label}
             >
               <Icon size={20} />
@@ -531,8 +660,12 @@ export default function App() {
         </nav>
 
         <button
+          type="button"
           className="rail-profile"
-          onClick={() => setSection("Paramètres")}
+          onClick={() => {
+            setSection("Paramètres");
+            setSelectedConversation(null);
+          }}
           title="Mon profil"
         >
           {initials(user.display_name)}
@@ -542,13 +675,12 @@ export default function App() {
       <section className="list-panel">
         <header className="panel-header">
           <div>
-            <div className="eyebrow">
-              ESPACE PERSONNEL
-            </div>
+            <div className="eyebrow">ESPACE PERSONNEL</div>
             <h1>{section}</h1>
           </div>
 
           <button
+            type="button"
             className="icon-btn"
             onClick={refresh}
             disabled={busy}
@@ -565,9 +697,7 @@ export default function App() {
               <Search size={17} />
               <input
                 value={search}
-                onChange={(e) =>
-                  setSearch(e.target.value)
-                }
+                onChange={(e) => setSearch(e.target.value)}
                 placeholder="Rechercher"
               />
             </div>
@@ -580,18 +710,16 @@ export default function App() {
             </div>
 
             {loading ? (
-              <div className="empty-state">
-                Chargement…
-              </div>
+              <div className="empty-state">Chargement…</div>
             ) : filteredConversations.length === 0 ? (
               <div className="empty-state">
                 <MessageCircle size={28} />
                 <strong>Aucune discussion</strong>
                 <span>
-                  Ajoute un contact avec son NEXORA ID
-                  pour commencer.
+                  Ajoute un contact avec son NEXORA ID pour commencer.
                 </span>
                 <button
+                  type="button"
                   className="text-action"
                   onClick={() => setSection("Contacts")}
                 >
@@ -600,19 +728,26 @@ export default function App() {
               </div>
             ) : (
               filteredConversations.map((c) => (
-                <div
-                  className="list-entry"
+                <button
+                  type="button"
+                  className={
+                    selectedConversation?.conversation_id ===
+                    c.conversation_id
+                      ? "list-entry conversation-entry selected"
+                      : "list-entry conversation-entry"
+                  }
                   key={c.conversation_id}
+                  onClick={() => openConversation(c)}
                 >
-                  <div className="avatar">
+                  <span className="avatar">
                     {initials(
                       c.participant_display_name ||
                         c.participant_username ||
                         "N"
                     )}
-                  </div>
+                  </span>
 
-                  <div className="entry-copy">
+                  <span className="entry-copy">
                     <strong>
                       {c.participant_display_name ||
                         c.title ||
@@ -623,16 +758,16 @@ export default function App() {
                         c.participant_nexora_id ||
                         "Aucun message"}
                     </span>
-                  </div>
+                  </span>
 
                   <span className="entry-time">
                     {c.last_message_at
-                      ? new Date(
-                          c.last_message_at
-                        ).toLocaleDateString("fr-FR")
+                      ? new Date(c.last_message_at).toLocaleDateString(
+                          "fr-FR"
+                        )
                       : ""}
                   </span>
-                </div>
+                </button>
               ))
             )}
           </>
@@ -644,28 +779,22 @@ export default function App() {
               AJOUTER UN UTILISATEUR
             </div>
 
-            <form
-              className="add-contact-form"
-              onSubmit={searchUser}
-            >
-              <label htmlFor="contact-id">
-                NEXORA ID
-              </label>
+            <form className="add-contact-form" onSubmit={searchUser}>
+              <label htmlFor="contact-id">NEXORA ID</label>
 
               <div className="inline-field">
                 <input
                   id="contact-id"
                   value={newContactId}
                   onChange={(e) =>
-                    setNewContactId(
-                      e.target.value.toUpperCase()
-                    )
+                    setNewContactId(e.target.value.toUpperCase())
                   }
                   placeholder="NXR-XXXXXXXX"
                 />
 
                 <button
                   disabled={busy || !newContactId.trim()}
+                  aria-label="Rechercher un utilisateur"
                 >
                   <Search size={17} />
                 </button>
@@ -679,16 +808,13 @@ export default function App() {
                 </div>
 
                 <div className="entry-copy">
-                  <strong>
-                    {foundUser.display_name}
-                  </strong>
-                  <span>
-                    @{foundUser.username}
-                  </span>
+                  <strong>{foundUser.display_name}</strong>
+                  <span>@{foundUser.username}</span>
                   <span>{foundUser.nexora_id}</span>
                 </div>
 
                 <button
+                  type="button"
                   className="primary-small"
                   onClick={addContact}
                   disabled={busy}
@@ -707,16 +833,12 @@ export default function App() {
                 <Users size={26} />
                 <strong>Aucun contact enregistré</strong>
                 <span>
-                  Les comptes réels apparaîtront ici
-                  après leur ajout.
+                  Les comptes réels apparaîtront ici après leur ajout.
                 </span>
               </div>
             ) : (
               filteredContacts.map((c) => (
-                <div
-                  className="list-entry"
-                  key={c.nexora_id}
-                >
+                <div className="list-entry" key={c.nexora_id}>
                   <div className="avatar">
                     {initials(c.display_name)}
                   </div>
@@ -736,9 +858,7 @@ export default function App() {
           <div className="empty-state">
             <CircleDot size={28} />
             <strong>Statuts</strong>
-            <span>
-              Aucun statut disponible.
-            </span>
+            <span>Aucun statut disponible.</span>
           </div>
         )}
 
@@ -747,8 +867,8 @@ export default function App() {
             <Phone size={28} />
             <strong>Appels</strong>
             <span>
-              Le système d'appels audio et vidéo
-              n'est pas encore opérationnel.
+              Le système d'appels audio et vidéo n'est pas encore
+              opérationnel.
             </span>
           </div>
         )}
@@ -768,6 +888,7 @@ export default function App() {
             </div>
 
             <button
+              type="button"
               className="logout-btn"
               onClick={logout}
             >
@@ -779,29 +900,128 @@ export default function App() {
       </section>
 
       <section className="workspace">
-        <div className="workspace-top">
-          <div className="workspace-logo">N</div>
-          <div>
-            <strong>NEXORA PRO</strong>
-            <span>Messagerie personnelle</span>
-          </div>
-        </div>
+        {selectedConversation ? (
+          <>
+            <header className="chat-header">
+              <button
+                type="button"
+                className="chat-back"
+                onClick={() => setSelectedConversation(null)}
+                aria-label="Retour aux discussions"
+              >
+                <ArrowLeft size={19} />
+              </button>
 
-        <div className="workspace-center">
-          <div className="workspace-emblem">N</div>
-          <h2>Votre espace de discussion</h2>
-          <p>
-            Vos conversations réelles apparaîtront ici.
-          </p>
-          <span>
-            Connecté en tant que {user.display_name}
-          </span>
-        </div>
+              <div className="avatar">
+                {initials(conversationTitle)}
+              </div>
+
+              <div className="chat-header-copy">
+                <strong>{conversationTitle}</strong>
+                <span>
+                  {selectedConversation.participant_nexora_id ||
+                    "Conversation privée"}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={refresh}
+                disabled={busy || messagesLoading}
+                title="Actualiser les messages"
+              >
+                <RefreshCw size={17} />
+              </button>
+            </header>
+
+            <div className="message-list">
+              {messagesLoading ? (
+                <div className="empty-state">
+                  Chargement des messages…
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="empty-state chat-empty">
+                  <MessageCircle size={28} />
+                  <strong>Aucun message</strong>
+                  <span>
+                    Cette conversation est vide. Envoie le premier
+                    message.
+                  </span>
+                </div>
+              ) : (
+                messages.map((message) => {
+                  const ownMessage =
+                    Boolean(user.id) && message.sender_id === user.id;
+
+                  return (
+                    <div
+                      key={message.id}
+                      className={
+                        ownMessage
+                          ? "message-row own"
+                          : "message-row received"
+                      }
+                    >
+                      <div className="message-bubble">
+                        <p>{message.content}</p>
+                        <span className="message-time">
+                          {message.edited_at ? "Modifié · " : ""}
+                          {formatMessageTime(message.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <form className="message-composer" onSubmit={sendMessage}>
+              <input
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Écrire un message…"
+                maxLength={10000}
+                disabled={sending}
+                aria-label="Votre message"
+              />
+
+              <button
+                type="submit"
+                disabled={!draft.trim() || sending}
+                aria-label="Envoyer le message"
+              >
+                <Send size={18} />
+              </button>
+            </form>
+          </>
+        ) : (
+          <>
+            <div className="workspace-top">
+              <div className="workspace-logo">N</div>
+              <div>
+                <strong>NEXORA PRO</strong>
+                <span>Messagerie personnelle</span>
+              </div>
+            </div>
+
+            <div className="workspace-center">
+              <div className="workspace-emblem">N</div>
+              <h2>Votre espace de discussion</h2>
+              <p>
+                Sélectionne une conversation pour afficher les messages.
+              </p>
+              <span>
+                Connecté en tant que {user.display_name}
+              </span>
+            </div>
+          </>
+        )}
 
         {(error || notice) && (
           <div className={error ? "toast error" : "toast"}>
             {error || notice}
-            <button onClick={clearMessages}>
+            <button type="button" onClick={clearMessages}>
               <X size={15} />
             </button>
           </div>
