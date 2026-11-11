@@ -51,6 +51,8 @@ type Message = {
   edited_at?: string | null;
   deleted_at?: string | null;
   created_at: string;
+  read_count?: number;
+  read_by_me?: number;
 };
 
 type Section =
@@ -220,6 +222,7 @@ export default function App() {
     };
   }, [token, loadWorkspace]);
 
+  // Actualisation des messages et des accusés de lecture.
   useEffect(() => {
     const conversationId =
       selectedConversation?.conversation_id;
@@ -231,24 +234,40 @@ export default function App() {
 
     let cancelled = false;
 
-    setMessages([]);
-    setMessagesLoading(true);
+    async function refreshMessages(initial = false) {
+      try {
+        if (initial && !cancelled) {
+          setMessagesLoading(true);
+        }
 
-    loadConversationMessages(conversationId, token)
-      .then((result) => {
+        const result = await loadConversationMessages(
+          conversationId,
+          token
+        );
+
         if (!cancelled) {
           setMessages(result.messages || []);
         }
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setMessagesLoading(false);
-      });
+      } catch (e) {
+        if (!cancelled) {
+          setError((e as Error).message);
+        }
+      } finally {
+        if (initial && !cancelled) {
+          setMessagesLoading(false);
+        }
+      }
+    }
+
+    refreshMessages(true);
+
+    const interval = window.setInterval(() => {
+      refreshMessages();
+    }, 3000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
     };
   }, [
     token,
@@ -445,7 +464,7 @@ export default function App() {
     }
   }
 
-  // Ajout du contact et ouverture de sa conversation réelle.
+  // Ajouter le contact et ouvrir sa conversation réelle.
   async function addContact() {
     if (!foundUser || busy) return;
 
@@ -964,6 +983,9 @@ export default function App() {
                   const ownMessage =
                     message.sender_id === user.id;
 
+                  const isRead =
+                    Number(message.read_count || 0) > 0;
+
                   return (
                     <div
                       key={message.id}
@@ -980,9 +1002,40 @@ export default function App() {
                             : message.content}
                         </p>
 
-                        <time>
-                          {formatTime(message.created_at)}
-                        </time>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "flex-end",
+                            gap: "6px"
+                          }}
+                        >
+                          <time>
+                            {formatTime(message.created_at)}
+                          </time>
+
+                          {ownMessage && (
+                            <span
+                              title={isRead ? "Lu" : "Envoyé"}
+                              aria-label={
+                                isRead
+                                  ? "Message lu"
+                                  : "Message envoyé"
+                              }
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: 700,
+                                letterSpacing: "-3px",
+                                paddingRight: "3px",
+                                color: isRead
+                                  ? "#35a7ff"
+                                  : "currentColor"
+                              }}
+                            >
+                              {isRead ? "✓✓" : "✓"}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
