@@ -1,3 +1,4 @@
+
 export interface MessagesEnv {
   DB: D1Database;
 }
@@ -19,12 +20,17 @@ interface MessageRow {
   edited_at: string | null;
   deleted_at: string | null;
   created_at: string;
+  read_count?: number;
+  read_by_me?: number;
 }
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
   });
 }
 
@@ -73,6 +79,21 @@ function createId(): string {
   return crypto.randomUUID();
 }
 
+async function markConversationAsRead(
+  DB: D1Database,
+  conversationId: string,
+  userId: string
+): Promise<void> {
+  await DB.prepare(`
+    INSERT OR IGNORE INTO message_reads (message_id, user_id)
+    SELECT m.id, ?
+    FROM messages m
+    WHERE m.conversation_id = ?
+      AND m.sender_id != ?
+      AND m.deleted_at IS NULL
+  `).bind(userId, conversationId, userId).run();
+}
+
 export async function handleMessages(
   request: Request,
   env: MessagesEnv,
@@ -82,7 +103,7 @@ export async function handleMessages(
   const pathname = url.pathname;
   const method = request.method;
 
-  // LISTER LES MESSAGES D'UNE CONVERSATION
+  // LISTER LES MESSAGES ET ENREGISTRER LEUR LECTURE
   if (method === "GET" && pathname === "/api/messages") {
     const conversationId = url.searchParams.get("conversation_id");
 
@@ -106,23 +127,45 @@ export async function handleMessages(
       }, 403);
     }
 
+    // Marquer les messages reçus comme lus.
+    await markConversationAsRead(
+      env.DB,
+      conversationId,
+      user.id
+    );
+
     const result = await env.DB.prepare(`
       SELECT
-        id,
-        conversation_id,
-        sender_id,
-        content,
-        message_type,
-        reply_to,
-        edited_at,
-        deleted_at,
-        created_at
-      FROM messages
-      WHERE conversation_id = ?
-        AND deleted_at IS NULL
-      ORDER BY created_at ASC
+        m.id,
+        m.conversation_id,
+        m.sender_id,
+        m.content,
+        m.message_type,
+        m.reply_to,
+        m.edited_at,
+        m.deleted_at,
+        m.created_at,
+        (
+          SELECT COUNT(*)
+          FROM message_reads mr
+          JOIN conversation_members cm
+            ON cm.user_id = mr.user_id
+           AND cm.conversation_id = m.conversation_id
+          WHERE mr.message_id = m.id
+            AND mr.user_id != m.sender_id
+        ) AS read_count,
+        EXISTS (
+          SELECT 1
+          FROM message_reads mine
+          WHERE mine.message_id = m.id
+            AND mine.user_id = ?
+        ) AS read_by_me
+      FROM messages m
+      WHERE m.conversation_id = ?
+        AND m.deleted_at IS NULL
+      ORDER BY m.created_at ASC
       LIMIT 500
-    `).bind(conversationId).all<MessageRow>();
+    `).bind(user.id, conversationId).all<MessageRow>();
 
     return json({
       success: true,
